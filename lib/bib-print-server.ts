@@ -84,7 +84,7 @@ function validElement(element: PrintTemplateElement): boolean {
 export async function savePrintTemplate(eventId: string, input: PrintTemplate): Promise<PrintTemplate> {
   if (input.eventId !== eventId || !input.ticketId || !input.name?.trim() || input.name.length > 100) throw new Error("A valid event, category and template name are required.");
   if (!["BIB", "STICKER"].includes(input.templateType) || !["ALL", "MALE", "FEMALE"].includes(input.genderScope)) throw new Error("Invalid template scope.");
-  if (input.templateType === "BIB" && !["A5", "A4", "12X18", "12X8"].includes(input.paperPreset)) throw new Error("Invalid BIB paper preset.");
+  if (input.templateType === "BIB" && !["A5", "A4_SINGLE_A5", "A4", "12X18", "12X8"].includes(input.paperPreset)) throw new Error("Invalid BIB paper preset.");
   if (input.templateType === "STICKER" && input.paperPreset !== "STICKER_4X2") throw new Error("Invalid sticker paper preset.");
   if (!Array.isArray(input.elements) || input.elements.length > 50 || !input.elements.every(validElement)) throw new Error("A design element is invalid or outside the canvas.");
   validatedPrintImage(input.backgroundDataUrl);
@@ -106,6 +106,36 @@ export async function newPrintTemplate(eventId: string, ticketId: string, type: 
   const configured = await configuredTicketIds(roster.event.id);
   if (!configured.has(ticketId) && !roster.participants.some((row) => row.ticketId === ticketId)) throw new Error("Category not found in this event.");
   return defaultPrintTemplate(roster.event.id, ticketId, type);
+}
+
+export async function duplicatePrintTemplate(
+  eventId: string,
+  sourceTemplateId: string,
+  targetTicketId: string,
+  targetSubcategoryId: string | null = null,
+): Promise<PrintTemplate> {
+  const roster = await printRoster(eventId);
+  const templates = await listPrintTemplates(roster.event.id);
+  const source = templates.find((item) => item.id === sourceTemplateId);
+  if (!source) throw new Error("The source print template was not found.");
+  const configured = await configuredTicketIds(roster.event.id);
+  if (!configured.has(targetTicketId) && !roster.participants.some((row) => row.ticketId === targetTicketId)) {
+    throw new Error("Destination category is not configured for this event.");
+  }
+  if (targetSubcategoryId && !roster.participants.some((row) => row.ticketId === targetTicketId && row.subcategoryId === targetSubcategoryId)) {
+    throw new Error("Destination subcategory is not present in this event roster.");
+  }
+  const now = new Date().toISOString();
+  return savePrintTemplate(roster.event.id, {
+    ...source,
+    id: crypto.randomUUID(),
+    ticketId: targetTicketId,
+    subcategoryId: targetSubcategoryId,
+    name: `${source.name} copy`,
+    version: 1,
+    createdAt: now,
+    updatedAt: now,
+  });
 }
 
 export async function auditRequest(eventId: string, path: string, method: "GET" | "POST", body?: unknown) {

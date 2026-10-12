@@ -1,4 +1,4 @@
-export type PrintPaperPreset = "A5" | "A4" | "12X18" | "12X8" | "STICKER_4X2";
+export type PrintPaperPreset = "A5" | "A4_SINGLE_A5" | "A4" | "12X18" | "12X8" | "STICKER_4X2";
 export type PrintTemplateType = "BIB" | "STICKER";
 export type PrintGenderScope = "ALL" | "MALE" | "FEMALE";
 export const PRINT_FONT_FAMILIES = [
@@ -81,9 +81,9 @@ export interface PrintTemplateLayout {
 }
 
 export const TWELVE_BY_EIGHTEEN_FOUR_A5_LAYOUT: Readonly<PrintTemplateLayout> = Object.freeze({
-  paperPreset: "12X18", pageWidthMm: 304.8, pageHeightMm: 457.2,
-  itemWidthMm: 148.5, itemHeightMm: 210, itemsPerPage: 4,
-  marginTopMm: 0, marginRightMm: 7.8, marginBottomMm: 37.2, marginLeftMm: 0,
+  paperPreset: "12X18", pageWidthMm: 457.2, pageHeightMm: 304.8,
+  itemWidthMm: 210, itemHeightMm: 148.5, itemsPerPage: 4,
+  marginTopMm: 0, marginRightMm: 37.2, marginBottomMm: 7.8, marginLeftMm: 0,
   gapMm: 0, cutLine: true, columns: 2, rows: 2,
 });
 
@@ -92,15 +92,22 @@ export const TWELVE_BY_EIGHT_FOUR_BIB_LAYOUT = TWELVE_BY_EIGHTEEN_FOUR_A5_LAYOUT
 
 const A5: Readonly<PrintTemplateLayout> = Object.freeze({
   paperPreset: "A5", pageWidthMm: 148.5, pageHeightMm: 210,
-  itemWidthMm: 148.5, itemHeightMm: 210, itemsPerPage: 1,
+  itemWidthMm: 210, itemHeightMm: 148.5, itemsPerPage: 1,
   marginTopMm: 0, marginRightMm: 0, marginBottomMm: 0, marginLeftMm: 0,
   gapMm: 0, cutLine: false, columns: 1, rows: 1,
 });
 
 const A4: Readonly<PrintTemplateLayout> = Object.freeze({
   paperPreset: "A4", pageWidthMm: 210, pageHeightMm: 297,
-  itemWidthMm: 148.5, itemHeightMm: 210, itemsPerPage: 1,
-  marginTopMm: 0, marginRightMm: 61.5, marginBottomMm: 87, marginLeftMm: 0,
+  itemWidthMm: 202, itemHeightMm: 142.5, itemsPerPage: 2,
+  marginTopMm: 4, marginRightMm: 4, marginBottomMm: 4, marginLeftMm: 4,
+  gapMm: 4, cutLine: true, columns: 1, rows: 2,
+});
+
+const A4_SINGLE_A5: Readonly<PrintTemplateLayout> = Object.freeze({
+  paperPreset: "A4_SINGLE_A5", pageWidthMm: 210, pageHeightMm: 297,
+  itemWidthMm: 210, itemHeightMm: 148.5, itemsPerPage: 1,
+  marginTopMm: 74.25, marginRightMm: 0, marginBottomMm: 74.25, marginLeftMm: 0,
   gapMm: 0, cutLine: false, columns: 1, rows: 1,
 });
 
@@ -113,7 +120,7 @@ const STICKER_4X2: Readonly<PrintTemplateLayout> = Object.freeze({
 
 export function fixedPrintLayout(preset: PrintPaperPreset, type: PrintTemplateType): PrintTemplateLayout {
   if (type === "STICKER") return { ...STICKER_4X2 };
-  return { ...(preset === "12X18" || preset === "12X8" ? TWELVE_BY_EIGHTEEN_FOUR_A5_LAYOUT : preset === "A4" ? A4 : A5) };
+  return { ...(preset === "12X18" || preset === "12X8" ? TWELVE_BY_EIGHTEEN_FOUR_A5_LAYOUT : preset === "A4" ? A4 : preset === "A4_SINGLE_A5" ? A4_SINGLE_A5 : A5) };
 }
 
 export function printPages(participants: PrintParticipant[], layout: PrintTemplateLayout): Array<Array<PrintParticipant | null>> {
@@ -268,24 +275,26 @@ export function renderPrintHtml(input: { template: PrintTemplate; participants: 
     return `<div class="print-item" data-participant-id="${escapePrintHtml(participant.participantId)}">${elements}</div>`;
   };
   const fourUp = layout.paperPreset === "12X18";
+  const rotateSingleBib = layout.paperPreset === "A5" || layout.paperPreset === "A4_SINGLE_A5";
   return `<!doctype html><html><head><meta charset="utf-8" /><style>
     @import url("https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap");
     @page { size: ${layout.pageWidthMm}mm ${layout.pageHeightMm}mm; margin: 0; }
     * { box-sizing: border-box; } html,body { width:${layout.pageWidthMm}mm; margin:0; padding:0; background:white; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
-    .print-page { position:relative; width:${layout.pageWidthMm}mm; height:${layout.pageHeightMm}mm; padding:0; background:white; overflow:hidden; break-after:page; page-break-after:always; display:grid; grid-template-columns:repeat(${layout.columns}, ${layout.itemWidthMm}mm); grid-template-rows:repeat(${layout.rows}, ${layout.itemHeightMm}mm); }
+    .print-page { position:relative; width:${layout.pageWidthMm}mm; height:${layout.pageHeightMm}mm; padding:${layout.marginTopMm}mm ${layout.marginRightMm}mm ${layout.marginBottomMm}mm ${layout.marginLeftMm}mm; gap:${layout.gapMm}mm; background:white; overflow:hidden; break-after:page; page-break-after:always; display:grid; grid-template-columns:repeat(${layout.columns}, ${layout.itemWidthMm}mm); grid-template-rows:repeat(${layout.rows}, ${layout.itemHeightMm}mm); }
     .print-page.four-up { display:block; }
     .print-page.four-up > .print-item { position:absolute; width:${layout.itemWidthMm}mm; height:${layout.itemHeightMm}mm; }
     .print-page.four-up > .print-item:nth-child(1) { left:0; top:0; }
     .print-page.four-up > .print-item:nth-child(2) { left:${layout.itemWidthMm}mm; top:0; }
     .print-page.four-up > .print-item:nth-child(3) { left:0; top:${layout.itemHeightMm}mm; }
     .print-page.four-up > .print-item:nth-child(4) { left:${layout.itemWidthMm}mm; top:${layout.itemHeightMm}mm; }
+    .print-page.rotated-single > .print-item { position:absolute;left:50%;top:50%;transform:translate(-50%,-50%) rotate(-90deg);transform-origin:center; }
     .print-page:last-child { break-after:auto; page-break-after:auto; }
     .print-item { position:relative; width:${layout.itemWidthMm}mm; height:${layout.itemHeightMm}mm; overflow:hidden; background-color:white;${background ? `background-image:url("${background}");background-position:center;background-size:cover;background-repeat:no-repeat;` : ""} }
     .print-item.blank { background-image:none; }
     .print-element { position:absolute; display:flex; flex-direction:column; align-items:stretch; overflow:hidden; white-space:pre-wrap; }
     .print-element img,.print-symbol svg { display:block; width:100%; height:100%; }
     .cut-guide { position:absolute; z-index:10; pointer-events:none; opacity:.65; }
-    .cut-guide.vertical { left:${layout.itemWidthMm}mm; top:0; height:${layout.itemHeightMm * layout.rows}mm; border-left:.18mm dashed #777; }
-    .cut-guide.horizontal { top:${layout.itemHeightMm}mm; left:0; width:${layout.itemWidthMm * layout.columns}mm; border-top:.18mm dashed #777; }
-    </style></head><body>${pages.map((page, index) => `<div class="print-page${fourUp ? " four-up" : ""}" data-page="${index + 1}">${page.map(renderItem).join("")}${layout.cutLine && layout.columns === 2 ? '<i class="cut-guide vertical"></i>' : ""}${layout.cutLine && layout.rows === 2 ? '<i class="cut-guide horizontal"></i>' : ""}</div>`).join("")}</body></html>`;
+    .cut-guide.vertical { left:${fourUp ? layout.itemWidthMm : layout.marginLeftMm + layout.itemWidthMm}mm; top:${layout.marginTopMm}mm; height:${layout.itemHeightMm * layout.rows + layout.gapMm * Math.max(0, layout.rows - 1)}mm; border-left:.18mm dashed #777; }
+    .cut-guide.horizontal { top:${fourUp ? layout.itemHeightMm : layout.pageHeightMm / 2}mm; left:${layout.marginLeftMm}mm; width:${layout.itemWidthMm * layout.columns + layout.gapMm * Math.max(0, layout.columns - 1)}mm; border-top:.18mm dashed #777; }
+    </style></head><body>${pages.map((page, index) => `<div class="print-page${fourUp ? " four-up" : ""}${rotateSingleBib ? " rotated-single" : ""}" data-page="${index + 1}">${page.map(renderItem).join("")}${layout.cutLine && layout.columns === 2 ? '<i class="cut-guide vertical"></i>' : ""}${layout.cutLine && layout.rows === 2 ? '<i class="cut-guide horizontal"></i>' : ""}</div>`).join("")}</body></html>`;
 }
