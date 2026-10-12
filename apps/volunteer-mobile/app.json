@@ -1,0 +1,66 @@
+{
+  "expo": {
+    "name": "Race Upshot Volunteer",
+    "slug": "raceupshot-volunteer",
+    "version": "1.0.0",
+    "icon": "./RACE UPSHOT VOLUYNTEER APP LOGO.png",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "ios": {
+      "icon": "./RACE UPSHOT VOLUYNTEER APP LOGO.png",
+      "supportsTablet": true,
+      "bundleIdentifier": "com.raceupshot.volunteer",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Race Upshot Volunteer uses the camera to scan athlete BIB and band QR codes.",
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "icon": "./RACE UPSHOT VOLUYNTEER APP LOGO.png",
+      "adaptiveIcon": {
+        "foregroundImage": "./RACE UPSHOT VOLUYNTEER APP LOGO.png",
+        "backgroundColor": "#009B4D"
+      },
+      "package": "com.raceupshot.volunteer",
+      "permissions": [
+        "CAMERA",
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "CAMERA",
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ]
+    },
+    "web": {
+      "bundler": "metro",
+      "favicon": "./RACE UPSHOT VOLUYNTEER APP LOGO.png"
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow Race Upshot Volunteer to scan athlete QR codes."
+        }
+      ],
+      "expo-secure-store"
+    ],
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "checkAutomatically": "ON_LOAD",
+      "fallbackToCacheTimeout": 0,
+      "url": "https://u.expo.dev/80b576e2-b02a-4ba8-ade5-8741b4d85d4a"
+    },
+    "experiments": {
+      "baseUrl": "/volunteer-app"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "80b576e2-b02a-4ba8-ade5-8741b4d85d4a"
+      }
+    },
+    "owner": "vaibhav6877"
+  }
+}

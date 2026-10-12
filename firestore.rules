@@ -1,0 +1,115 @@
+rules_version = '2';
+
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// Collection: users
+// Document ID: Firebase Auth UID
+// Fields:
+//   uid: string, required and immutable, 1-128 characters
+//   email: string, required and equal to the authenticated token email
+//   name: string, required, 2-100 characters
+//   phoneCountryCode: string, required, e.g. +91
+//   mobileNumber: string, required, 5-15 digits
+//   country/state/city: strings, required, 2-80 characters
+//   photoUrl: string, required, empty, HTTPS, or compressed JPEG data, at most 180000 characters
+//   signInProvider: string, required, 1-50 characters
+//   createdAt: timestamp, required and immutable
+//   updatedAt: timestamp, required
+//
+// This document contains PII and is readable only by its owner.
+// ===============================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function uidUnchanged(userId) {
+      return request.resource.data.uid == userId;
+    }
+
+    function uidNotModified() {
+      return request.resource.data.uid == resource.data.uid;
+    }
+
+    function isLegacyProfile() {
+      return !resource.data.keys().hasAll(['uid', 'createdAt'])
+        || !(resource.data.uid is string)
+        || resource.data.uid != request.auth.uid
+        || !(resource.data.createdAt is timestamp);
+    }
+
+    function validString(value, minimum, maximum) {
+      return value is string && value.size() >= minimum && value.size() <= maximum;
+    }
+
+    function validProfile(data) {
+      return data.keys().hasOnly([
+          'uid', 'email', 'name', 'phoneCountryCode', 'mobileNumber',
+          'country', 'state', 'city', 'photoUrl', 'signInProvider',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasAll([
+          'uid', 'email', 'name', 'phoneCountryCode', 'mobileNumber',
+          'country', 'state', 'city', 'photoUrl', 'signInProvider',
+          'createdAt', 'updatedAt'
+        ])
+        && validString(data.uid, 1, 128)
+        && validString(data.email, 3, 254)
+        && data.email == request.auth.token.email
+        && validString(data.name, 2, 100)
+        && validString(data.phoneCountryCode, 2, 5)
+        && data.phoneCountryCode.matches('^\\+[0-9]{1,4}$')
+        && validString(data.mobileNumber, 5, 15)
+        && data.mobileNumber.matches('^[0-9]{5,15}$')
+        && validString(data.country, 2, 80)
+        && validString(data.state, 2, 80)
+        && validString(data.city, 2, 80)
+        && data.photoUrl is string
+        && data.photoUrl.size() <= 180000
+        && (
+          data.photoUrl == ''
+          || data.photoUrl.matches('^https://.*$')
+          || data.photoUrl.matches('^data:image/jpeg;base64,[A-Za-z0-9+/=]+$')
+        )
+        && validString(data.signInProvider, 1, 50)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    match /users/{userId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId)
+        && uidUnchanged(userId)
+        && validProfile(request.resource.data)
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update: if isOwner(userId)
+        && uidUnchanged(userId)
+        && validProfile(request.resource.data)
+        && (
+          (
+            uidNotModified()
+            && request.resource.data.createdAt == resource.data.createdAt
+          )
+          || (
+            isLegacyProfile()
+            && request.resource.data.createdAt == request.time
+          )
+        )
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

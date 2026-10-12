@@ -1,0 +1,11 @@
+# Transactional notifications
+
+Race Upshot sends through its existing server-side Bergtecno email and AiSensy WhatsApp integrations. Neither provider is contacted in local development or tests. Production sending is also disabled by default: it requires `NODE_ENV=production`, `APP_ENV=production`, and the server-only `TRANSACTIONAL_NOTIFICATIONS_LIVE_ENABLED=true` secret. Do not enable this until provider templates, contacts, a controlled test, and deployment are separately approved.
+
+In the Live Timing notification settings, configure and enable the event, channel, and workflow switches. Set the event's Bergtecno template IDs and AiSensy campaign names for finisher triathlon, finisher single-sport, and registration confirmations as applicable. The fallback finisher template/campaign can be used instead of separate sport templates. Do not place provider credentials in the browser or repository.
+
+Registration confirmation is triggered only after an admin-edited, persisted registration transitions from a non-final status to `CONFIRMED`, `PAID`, `COMPLETED`, or `FINALIZED`. Roster imports and result uploads never trigger it. No invoice link is added: the current imported-roster flow does not create an invoice artifact.
+
+Finisher notification requires a published result row with official finish evidence and complete contest timing. Triathlon requires Swim, T1, Bike, T2, and Run durations. DNS, DNF, DSQ, provisional, voided, and incomplete results are skipped. Automatic sends require a source-supplied participant/result ID unique within the contest. Generated BIB-based IDs or duplicate source IDs require exact-row admin review and a confirmed manual send.
+
+The event-scoped Durable Object keeps atomic per-channel claims, attempt history, skip reasons, contact-correction audit, and provider responses. `PROVIDER_ACCEPTED` means the API accepted the request, not that it reached the athlete. Ambiguous timeouts remain `UNCONFIRMED` and are not automatically retried. Admin bulk actions require an exact dry-run token and confirmation, and process at most ten recipients per channel per call. Results reset preserves the ledger but removes active result rows, preventing new automatic sends.

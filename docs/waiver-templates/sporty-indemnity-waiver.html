@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Indemnity Cum Waiver Agreement</title>
+  <style>
+    @page { size: A4; margin: 18mm 16mm 20mm; }
+    :root { --ink:#0b1f2a; --muted:#60717a; --green:#0a8f58; --blue:#087b91; --line:#d9e5e7; --wash:#f2f8f7; --warm:#fff7e7; }
+    * { box-sizing: border-box; }
+    html { background:#eaf1f2; }
+    body { margin:0; color:var(--ink); background:#eaf1f2; font:14px/1.65 Inter, Arial, sans-serif; }
+    .waiver-shell { max-width:900px; margin:28px auto; background:#fff; border:1px solid var(--line); border-radius:24px; overflow:hidden; box-shadow:0 18px 48px rgba(9,35,48,.12); }
+    .hero { padding:36px 40px 30px; color:#fff; background:linear-gradient(135deg,#071722 0%,#0a3144 58%,#087b91 100%); border-bottom:6px solid #19b96f; }
+    .eyebrow { margin:0 0 10px; color:#71e5ad; font-size:12px; font-weight:900; letter-spacing:1.8px; text-transform:uppercase; }
+    h1 { margin:0; color:#fff; font-size:34px; line-height:1.12; letter-spacing:-.7px; }
+    .hero p { max-width:680px; margin:13px 0 0; color:#d7e8ed; }
+    .content { padding:32px 40px 42px; }
+    .participant-card { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:13px 22px; margin:0 0 28px; padding:22px; background:var(--wash); border:1px solid #cfe4df; border-radius:18px; }
+    .participant-card h2 { grid-column:1/-1; margin:0 0 4px; padding:0; border:0; color:var(--green); }
+    .field { min-width:0; }
+    .field span { display:block; margin-bottom:2px; color:var(--muted); font-size:10px; font-weight:900; letter-spacing:1px; text-transform:uppercase; }
+    .field strong { display:block; overflow-wrap:anywhere; color:var(--ink); font-size:14px; }
+    .agreement-opening { margin:22px 0 28px; padding:20px 22px; border-left:5px solid var(--blue); background:#f7fafb; border-radius:0 14px 14px 0; }
+    .agreement-opening p { margin:0 0 12px; }
+    .agreement-opening p:last-child { margin-bottom:0; }
+    h2 { margin:30px 0 13px; padding-bottom:8px; color:#073b4c; font-size:18px; line-height:1.3; border-bottom:2px solid #d9eeee; break-after:avoid-page; page-break-after:avoid; }
+    h3 { margin:18px 0 7px; color:#0a6f83; font-size:14px; break-after:avoid-page; page-break-after:avoid; }
+    p { margin:0 0 10px; orphans:3; widows:3; }
+    ol, ul { margin:7px 0 14px; padding-left:24px; }
+    li { margin:0 0 6px; break-inside:avoid-page; page-break-inside:avoid; }
+    .alpha { list-style-type:lower-alpha; }
+    .roman { list-style-type:lower-roman; }
+    .notice { margin:22px 0; padding:16px 18px; background:var(--warm); border:1px solid #f0d59a; border-radius:14px; }
+    .certification { margin-top:30px; padding:22px; background:#071722; color:#fff; border-radius:18px; break-inside:avoid-page; page-break-inside:avoid; }
+    .certification h2 { margin-top:0; color:#70e6ad; border-bottom-color:#33505d; }
+    .certification ol { margin-bottom:0; }
+    .signature { display:grid; grid-template-columns:1fr 1fr; gap:18px; margin-top:24px; padding:20px 22px; border:2px solid #b9ddd2; border-radius:16px; break-inside:avoid-page; page-break-inside:avoid; }
+    .signature span { display:block; color:var(--muted); font-size:10px; font-weight:900; letter-spacing:1px; text-transform:uppercase; }
+    .signature strong { display:block; margin-top:5px; color:var(--green); font-size:16px; }
+    .document-footer { margin-top:26px; padding-top:14px; color:var(--muted); font-size:11px; text-align:center; border-top:1px solid var(--line); }
+    @media (max-width:640px) { .waiver-shell{margin:0;border:0;border-radius:0}.hero,.content{padding:26px 20px}.participant-card,.signature{grid-template-columns:1fr}h1{font-size:28px} }
+    @media print { html,body{background:#fff}.waiver-shell{max-width:none;margin:0;border:0;border-radius:0;box-shadow:none}.hero{-webkit-print-color-adjust:exact;print-color-adjust:exact}.content{padding:9mm 0 0}.participant-card,.certification{print-color-adjust:exact} }
+  </style>
+</head>
+<body>
+  <main class="waiver-shell">
+    <header class="hero">
+      <p class="eyebrow">Race Upshot · Athlete Safety &amp; Participation</p>
+      <h1>Indemnity Cum Waiver Agreement</h1>
+      <p>Please read this agreement carefully. It records the participant’s acknowledgement of risk, release, indemnity and consent for the event identified below.</p>
+    </header>
+
+    <div class="content">
+      <section class="participant-card">
+        <h2>Participant Information</h2>
+        <div class="field"><span>Name</span><strong>{{name}}</strong></div>
+        <div class="field"><span>BIB Number</span><strong>{{bib_number}}</strong></div>
+        <div class="field"><span>Event Name</span><strong>{{eventname}}</strong></div>
+        <div class="field"><span>Event Category</span><strong>{{category}}</strong></div>
+        <div class="field"><span>Event Date</span><strong>{{eventdate}}</strong></div>
+        <div class="field"><span>Address</span><strong>{{address}}</strong></div>
+        <div class="field"><span>Phone</span><strong>{{phone}}</strong></div>
+        <div class="field"><span>Email</span><strong>{{email}}</strong></div>
+        <div class="field"><span>Emergency Contact</span><strong>{{emergency_number}}</strong></div>
+        <div class="field"><span>Legal Jurisdiction</span><strong>{{jurisdiction}}</strong></div>
+      </section>
+
+      <section class="agreement-opening">
+        <p><strong>THIS AGREEMENT</strong> is made this {{day}} day of {{date}}</p>
+        <p><strong>BETWEEN</strong></p>
+        <p><strong>{{organizer_name}}</strong>, {{company_description}}, {{organizer_address}}, {{country}} (hereinafter referred to as the “Organiser” or the “Company”)</p>
+        <p><strong>WHEREAS</strong>, the Organiser is constituted to promote, propagate, support and stimulate indoor and outdoor sports and games in India by laying down policies, roadmaps, guidelines, and rules and regulations, conducting sports competitions and matches, providing playing facilities, training programmes, and fostering sports participation across all ages and sections of the community for health, welfare, and leisure benefits;</p>
+        <p><strong>AND WHEREAS</strong>, the Participant desires to participate in the sports events, competitions, matches, training programmes, or activities (hereinafter collectively referred to as the “Event”) organized or to be organized by the Organiser;</p>
+        <p><strong>AND WHEREAS</strong>, the Organiser wishes to establish clear terms and conditions governing the Participant’s participation, acknowledging inherent risks in sports activities and implementing protective measures to safeguard the Organiser from all liabilities whatsoever;</p>
+        <p><strong>NOW, THEREFORE</strong>, in consideration of the mutual covenants and agreements contained herein, the parties hereto agree as follows:</p>
+      </section>
+
+      <section>
+        <h2>1. Definitions</h2>
+        <p><strong>1.1. “Agreement”</strong> means this Indemnity-cum-Waiver Agreement, including all schedules, annexures, Event-specific rules, guidelines and any amendments issued by the Organiser from time to time.</p>
+        <p><strong>1.2. “Organiser”</strong> means {{organizer_name}}, including its directors, officers, employees, agents, representatives, volunteers, contractors, vendors, sponsors, affiliates, successors and permitted assigns.</p>
+        <p><strong>1.3. “Participant”</strong> means any individual who registers for, attends, participates in, trains for, or is otherwise present at the Event, including amateur, professional, elite or recreational participants and includes minors acting through a parent or legal guardian.</p>
+        <p><strong>1.4. “Event”</strong> means any sports event, competition, match, tournament, league, marathon, training programme, fitness activity, workshop, trial or related activity (indoor or outdoor) organised, hosted, promoted or conducted by the Organiser, whether physical, virtual, hybrid, or modified in format.</p>
+        <p><strong>1.5. “Venue”</strong> means any stadium, ground, track, route, indoor facility, outdoor location, training area, accommodation, transport point or ancillary premises used in connection with the Event.</p>
+        <p><strong>1.6. “Released Parties”</strong> means collectively the Organiser, its directors, officers, employees, agents, representatives, volunteers, contractors, vendors, sponsors, broadcasters, venue owners, medical personnel, governing bodies and all affiliated persons or entities involved in the Event.</p>
+        <p><strong>1.7. “Force Majeure Event”</strong> means any event or circumstance beyond the reasonable control of the Organiser, including but not limited to natural calamities, extreme or unsafe weather, pandemics or epidemics, public health emergencies, government orders or restrictions, lockdowns, security threats, terrorism, war, civil unrest, labour disputes, utility failures or non-availability of venues, routes, infrastructure, personnel, equipment or essential services.</p>
+        <p><strong>1.8. “High-Risk or Contact Sports”</strong> means sporting activities that inherently involve physical contact, speed, endurance, height, water or other risk factors, including but not limited to marathons, triathlons, cycling, football, cricket, athletics, adventure sports, water sports and any activity designated as such by the Organiser.</p>
+        <p><strong>1.9. “Anti-Doping Rules”</strong> means the rules, regulations, codes and guidelines issued by the National Anti-Doping Agency (NADA), the World Anti-Doping Code, and any relevant sports federation or authority governing the Event.</p>
+        <p><strong>1.10. “Personal Data”</strong> means any information relating to the Participant, including name, contact details, identification details, images, performance data, and demographic information, as defined under applicable Indian data protection laws.</p>
+        <p><strong>1.11. “Sensitive Personal Data”</strong> means medical, health, biometric or financial information of the Participant, as recognised under applicable Indian law.</p>
+        <p><strong>1.12. “Rules”</strong> means all Event rules, safety protocols, codes of conduct, disciplinary guidelines, instructions, advisories and policies issued by the Organiser, whether published on its website, communicated digitally, displayed at the Venue or conveyed by officials.</p>
+      </section>
+
+      <section>
+        <h2>2. Assumption of Risk &amp; Acknowledgement</h2>
+        <p><strong>2.1.</strong> The Participant hereby acknowledges and fully recognizes that participation in the Event(s) involves inherent and significant risks of serious bodily injury, permanent disability, disfigurement, mental injury, emotional distress, illness and death, arising from but not limited to:</p>
+        <ol class="alpha">
+          <li>Collision with other participants, equipment, vehicles, or structures;</li>
+          <li>Falls, slips and contacts with playing surfaces;</li>
+          <li>Exertion-related conditions including heat exhaustion, dehydration, cardiac events, seizures or stroke;</li>
+          <li>Equipment failure or malfunction;</li>
+          <li>Exposure to environmental hazards (weather, terrain, water bodies, wildlife);</li>
+          <li>Inadequate medical response or availability of emergency services;</li>
+          <li>Actions or omissions of the Organisers, their officials, volunteers, contractors or vendors;</li>
+          <li>Breach of rules, safety protocols or the Participant’s own negligence or misconduct.</li>
+        </ol>
+        <h3>2.2. Voluntary Participation</h3>
+        <p>The Participant affirms that participation in the Event is entirely voluntary and undertaken at the Participant’s sole discretion, with full knowledge of these risks. The Participant has had adequate opportunity to seek medical or legal advice before registration and assumes full responsibility for assessing their physical fitness, medical condition, and preparedness for the Event.</p>
+        <p><strong>2.3.</strong> The Participant acknowledges that the Organisers offers no guarantee of safety, medical care adequacy, emergency response efficiency or prevention of injury or damage. The Participant accepts these risks as an integral and inherent part of sports participation.</p>
+      </section>
+
+      <section>
+        <h2>3. Medical Fitness Certification &amp; Health Undertaking</h2>
+        <h3>3.1. Health Declaration</h3>
+        <p>The Participant hereby certifies and undertakes that:</p>
+        <ol class="alpha">
+          <li>They are in good physical and mental health and medically fit to participate in the Event;</li>
+          <li>They have no underlying medical conditions (cardiac, respiratory, neurological, musculoskeletal, psychiatric) that could be aggravated by intense physical exertion or sports activity;</li>
+          <li>They are not under medication that could impair judgment, coordination, or physical performance;</li>
+          <li>They have not been advised by any qualified medical practitioner to avoid strenuous physical activity;</li>
+          <li>They have disclosed all relevant medical history truthfully in the registration form;</li>
+          <li>They assume full liability for any medical complications arising during or after participation.</li>
+        </ol>
+        <h3>3.2. Medical Examination (Optional)</h3>
+        <p>Participants aged above 40 years or with known medical conditions are strongly advised to obtain written medical fitness certification from a qualified medical practitioner before participation. Failure to obtain such certification shall not relieve the Participant of liability to the Organisers.</p>
+        <h3>3.3. Assumption of Medical Risk</h3>
+        <p>The Participant assumes sole responsibility for monitoring their health during the Event and shall immediately withdraw if they experience dizziness, chest pain, shortness of breath, or any distress. The Organisers shall not be liable for any medical emergency arising from the Participant’s failure or negligence to withdraw or disclose health conditions.</p>
+      </section>
+
+      <section>
+        <h2>4. Release &amp; Waiver of Liability</h2>
+        <p><strong>4.1.</strong> To the maximum extent permitted by law, the Participant hereby irrevocably releases, waives and relinquishes all claims, demands, actions, suits, causes of action, proceedings and rights to sue against the Organiser, its directors, officers, employees, agents, representatives, volunteers, contractors, vendors, sponsors, venue owners, medical personnel and all affiliated parties (collectively, the “Released Parties”), whether acting in an official capacity or otherwise, for any and all injuries, losses, damages, liabilities, costs (including legal and medical costs), and expenses of any kind whatsoever, arising directly or indirectly from:</p>
+        <ol class="alpha">
+          <li>Participation in the Event or any related activities;</li>
+          <li>Use of facilities, equipment, or services provided by the Organisers;</li>
+          <li>Actions, omissions, or negligence of the Released Parties (including gross negligence, except where such exclusion is prohibited by law);</li>
+          <li>Breach of any rules, safety protocols, or instructions;</li>
+          <li>Medical emergencies, cardiac events, or other health complications;</li>
+          <li>Property damage, theft, or loss of personal belongings;</li>
+          <li>Weather conditions, environmental hazards, or force majeure events;</li>
+          <li>Third-party actions or interference;</li>
+          <li>Any incident directly or remotely connected to the Event.</li>
+        </ol>
+        <p><strong>4.2.</strong> Nothing herein shall exclude or limit the Organiser’s liability for death or personal injury caused by the Organiser’s gross negligence, recklessness, willful misconduct, or violation of mandatory statutory duties, to the extent such exclusion is prohibited under the Indian Contract Act, 1872, or applicable laws. The Participant recognizes, however, that ordinary negligence, administrative oversights or regulatory lapses shall not constitute gross negligence and remain within this Release.</p>
+      </section>
+
+      <section>
+        <h2>5. Indemnity</h2>
+        <p><strong>5.1.</strong> The Participant hereby agrees to indemnify, defend (at the sole option of the Organiser), and hold harmless the Organiser, event sponsors, promoters, officials, referees, medical staff, venue owners, governing bodies, and their respective directors, officers, employees, agents, and representatives (“Released Parties”) from and against any and all claims, demands, actions, proceedings, liabilities, losses, damages, penalties, fines, costs, and expenses (including reasonable advocate’s fees, court fees, and incidental or consequential damages), arising out of, relating to, or in connection with:</p>
+        <ol class="alpha">
+          <li><strong>Participant’s Conduct and Breach:</strong> Any act, omission, misconduct, negligence, breach of event rules, code of conduct, safety protocols, or violation of this Agreement or any rules, regulations or guidelines issued by the Organiser or relevant sports authorities applicable in India;</li>
+          <li><strong>Participant-Caused Injury or Damage:</strong> Any bodily injury, illness, permanent disability, death, or loss of or damage to property caused directly or indirectly by the Participant to themselves or to any third party, including other participants, officials, spectators, or venue property, during or in connection with participation in the Event;</li>
+          <li><strong>Breach of Representations:</strong> Any false statement, misrepresentation, or breach of the Participant’s declarations or warranties relating to physical fitness, medical condition, eligibility, age, identity, or legal capacity to participate in the Event under applicable Indian laws;</li>
+          <li><strong>Third-Party Claims:</strong> Any claim, complaint, suit, or proceeding initiated by any third party (including other participants, spectators, venue authorities, governmental bodies, or local authorities) arising from or attributable to the Participant’s acts, omissions, or non-compliance during the Event;</li>
+          <li><strong>Force Majeure Events:</strong> Any claims or damages arising out of weather conditions, environmental factors, natural calamities, or force majeure events, to the extent such loss, damage or injury is caused, aggravated or contributed to by the Participant’s actions, negligence or failure to follow safety instructions;</li>
+          <li><strong>Violation of Laws:</strong> Any violation or alleged violation by the Participant of any applicable central, state or local laws, rules, notifications or regulations in India, including but not limited to laws relating to public safety, traffic, environment, sporting conduct, or criminal or civil liability, during or in connection with the Event.</li>
+        </ol>
+        <h3>5.2. Anti-Doping Compliance</h3>
+        <ol class="alpha">
+          <li>The Participant expressly represents and warrants that they shall strictly comply with all applicable anti-doping laws, rules and regulations in force in India, including the National Anti-Doping Agency (NADA) Rules, the World Anti-Doping Code and any guidelines issued by the relevant sports federation or authority governing the Event.</li>
+          <li>The Participant confirms that they have not consumed, used, possessed or administered any prohibited substance or method, as notified under the applicable anti-doping regulations, prior to or during participation in the Event.</li>
+          <li>In the event the Participant fails, refuses or evades any doping test or is found to have committed an anti-doping rule violation (including adverse analytical findings, whereabouts failures or tampering), the Participant shall be solely responsible for all consequences arising therefrom.</li>
+          <li>The Participant shall indemnify and hold harmless the Released Parties from any claims, penalties, sanctions, suspensions, reputational harm, costs or proceedings arising due to any anti-doping rule violation attributable to the Participant.</li>
+          <li>The Organiser reserves the right to disqualify the Participant, withdraw results, forfeit prizes or benefits, and report the violation to the competent authorities without any liability.</li>
+        </ol>
+        <p><strong>5.3.</strong> The Organisers may, at its sole discretion, assume control of the Participant’s defense against any third-party claim. The Participant agrees to cooperate fully, provide all necessary information, and refrain from admitting liability or settling claims without the Organiser’s written consent.</p>
+        <p><strong>5.4.</strong> This indemnity shall survive the completion, cancellation, or termination of the Event and shall be enforceable to the fullest extent permitted under Indian law, including the Indian Contract Act, 1872.</p>
+      </section>
+
+      <section>
+        <h2>6. Non-Refundable Fees &amp; Payment Terms</h2>
+        <p><strong>6.1.</strong> The Participant acknowledges that all entry fees, registration charges or payments made for participation in the Event are non-refundable and non-transferable, regardless of:</p>
+        <ol class="alpha">
+          <li>Cancellation or postponement of the Event;</li>
+          <li>The Participant’s inability to attend;</li>
+          <li>Medical or personal circumstances;</li>
+          <li>Weather conditions or force majeure;</li>
+          <li>Changes to Event format, schedule, or location;</li>
+          <li>The Organiser’s decision to modify, reduce, or cancel activities.</li>
+        </ol>
+        <div class="notice"><strong>6.2. NO REFUND, CREDIT, OR COMPENSATION</strong> shall be due to the Participant in any circumstance. Entry fees are collected solely to defray organizational costs and shall not be considered earnest money, security deposit, or conditional payment.</div>
+        <p><strong>6.3.</strong> The Participant’s payment of entry fees constitutes acknowledgement and acceptance of all terms in this Agreement. Disputed or delayed payments shall not constitute grounds for exemption from any terms herein.</p>
+      </section>
+
+      <section>
+        <h2>7. Intellectual Property &amp; Data Usage</h2>
+        <p><strong>7.1.</strong> The Participant hereby irrevocably grants, assigns and licenses to the Organiser(s), their affiliates, sponsors, licensees, broadcasters, media partners and assigns, a perpetual, worldwide, royalty-free, transferable and sublicensable right to record, use, reproduce, publish, display, distribute, adapt, modify, transmit and otherwise exploit, in any manner whatsoever and in any media now known or hereafter devised, the Participant’s:</p>
+        <ol class="roman">
+          <li>Name, image, likeness, voice, signature, biography, and appearance;</li>
+          <li>Photographs, video footage, audio recordings, and audio visual works captured before, during, or after the Event;</li>
+          <li>Performance-related data, including results, timings, rankings, statistics, and analytical outputs generated in connection with the Event;</li>
+          <li>Non-sensitive personal and demographic information provided by the Participant,</li>
+        </ol>
+        <p>for lawful purposes including but not limited to event promotion, marketing, branding, publicity, media broadcast, social media dissemination, reporting, editorial use, archival documentation, academic or performance research and historical records, without any further consent, notice, approval or compensation to the Participant.</p>
+        <p>The Participant expressly waives any and all claims of infringement of intellectual property rights, moral rights, personality rights, publicity rights, or privacy arising from such permitted use, to the fullest extent permissible under Indian law.</p>
+        <p><strong>7.2.</strong> All recordings, compilations, databases, broadcasts, and derivative works created by or on behalf of the Organiser in connection with the Event shall constitute the exclusive intellectual property of the Organiser and the Participant shall have no right, title or interest therein, save and except the limited right of personal, non-commercial use, if expressly permitted by the Organiser in writing.</p>
+        <h3>7.3. Data Protection and Privacy Compliance</h3>
+        <ol class="alpha">
+          <li>The Participant acknowledges that personal data collected during registration and participation shall be processed, stored and used by the Organiser in accordance with applicable Indian data protection laws and principles of lawful purpose, necessity and proportionality.</li>
+          <li>The Organiser shall not disclose or share sensitive personal data, including medical or financial information, with third parties except where required by applicable law, court order, or governmental authority; for emergency medical treatment; or with authorized service providers strictly on a need-to-know basis and subject to confidentiality obligations.</li>
+          <li>The Participant consents to reasonable cross-border data transfers where required for event operations, analytics, or media dissemination, subject to compliance with applicable legal safeguards.</li>
+        </ol>
+        <h3>7.4. Limited Confidentiality and No Anonymity Guarantee</h3>
+        <p>The Participant acknowledges that the Event is a public sporting activity and notwithstanding any request for confidentiality, the Organiser cannot and does not guarantee anonymity, exclusion from incidental or crowd-based recordings, or omission from media coverage. Participation in the Event, including continued presence at the Venue, shall be deemed to constitute ongoing and informed consent to recording and data usage in accordance with this Agreement.</p>
+      </section>
+
+      <section>
+        <h2>8. Participant Obligations, Conduct &amp; Event Rules</h2>
+        <p>By registering for and/or participating in the Event, the Participant expressly acknowledges, represents and agrees as follows:</p>
+        <ol class="alpha">
+          <li>The Participant shall strictly comply with all Event rules, regulations, schedules, safety protocols, risk disclosures, and lawful instructions issued by the Organiser, referees, officials, stewards, security personnel, or designated medical staff, whether issued orally, in writing, digitally, or displayed at the Venue. Any failure or refusal to comply shall constitute a material breach.</li>
+          <li>The Participant confirms that they are medically fit, adequately trained, and capable of safely participating in the Event. The Participant shall use all mandatory protective gear and equipment, immediately report any injury, discomfort, or medical condition, and cease participation upon medical advice or official direction. Non-disclosure or misrepresentation of medical conditions shall be deemed a wilful breach.</li>
+          <li>The Participant acknowledges that the Event may involve contact or high-risk sporting activities carrying inherent and foreseeable risks, including serious injury, permanent disability, or death. Participation is voluntary, undertaken at the Participant’s own risk, and subject to strict adherence to enhanced safety requirements.</li>
+          <li>The Participant shall conduct themselves in a sportsmanlike, respectful, and lawful manner at all times. Any form of harassment, sexual misconduct, violence, abuse, intimidation, discrimination, retaliation, hate speech, or inappropriate behaviour—whether physical, verbal, written, or digital—is strictly prohibited and shall attract immediate action.</li>
+          <li>The Participant acknowledges that the Event is governed by a POSH-compliant Internal Complaints Committee (ICC) and agrees to submit to its jurisdiction, inquiry process, and recommendations. This shall be without prejudice to the Organiser’s right to take immediate interim or disciplinary action in the interest of safety and dignity.</li>
+          <li>The Participant shall not consume alcohol, narcotic drugs, psychotropic substances, or any prohibited or banned substances before or during the Event, except as lawfully prescribed and duly disclosed. The Participant agrees to comply with applicable anti-doping rules, testing procedures, and sanctions.</li>
+          <li>The Organiser reserves the absolute right to disqualify, suspend, remove or permanently bar the Participant from the Event or future events for any breach of this clause, without refund of registration fees or compensation of any nature.</li>
+          <li>Disqualification, withdrawal, or removal shall not absolve the Participant of responsibility or liability for any injury, loss, damage, claim, penalty, or proceeding arising from their acts, omissions, misconduct, or non-compliance, whether occurring before or after such disqualification.</li>
+        </ol>
+      </section>
+
+      <section>
+        <h2>9. Assumption of Third-Party Liability</h2>
+        <p><strong>9.1.</strong> If any third party (including other participants, spectators, venue owners, or property owners) brings a claim or suit against the Organisers arising from the Participant’s conduct, actions, or negligence, the Participant shall fully indemnify the Organisers and defend all such claims at the Participant’s sole expense, including advocate’s fees and costs.</p>
+        <p><strong>9.2.</strong> The Participant acknowledges that spectators and members of the public may be present at the Event and may be exposed to risks of injury from the Participant’s participation. The Participant assumes all liability for injuries or damages to third parties arising from the Participant’s presence or conduct.</p>
+      </section>
+
+      <section>
+        <h2>10. Governing Law, Arbitration &amp; Exclusive Jurisdiction</h2>
+        <p><strong>10.1.</strong> This Agreement shall be governed by and construed in accordance with the laws of the Republic of India, including the Indian Contract Act, 1872, the Arbitration and Conciliation Act, 1996, and all applicable laws in force in <strong>{{jurisdiction}}</strong>.</p>
+        <p><strong>10.2.</strong> All disputes, controversies, claims, or differences arising out of or in connection with this Agreement, the Event, registration, participation, interpretation, performance, breach, termination, validity, or enforceability of this Agreement shall be resolved by binding arbitration, subject to applicable law and the court-jurisdiction provisions below.</p>
+        <p><strong>10.3.</strong> The arbitration shall be conducted under the Arbitration and Conciliation Act, 1996, as amended, on the following terms:</p>
+        <ol class="alpha">
+          <li><strong>Sole Arbitrator:</strong> The dispute shall be referred to a sole arbitrator appointed by mutual agreement of the parties. If the parties fail to agree within 30 days, the arbitrator shall be appointed in accordance with the Arbitration and Conciliation Act, 1996.</li>
+          <li><strong>Seat and Venue:</strong> The seat and venue of arbitration shall be <strong>{{jurisdiction}}</strong>. Proceedings shall be conducted in English.</li>
+          <li><strong>Rules:</strong> The arbitration shall be conducted in accordance with the Arbitration and Conciliation Act, 1996 and applicable procedural rules.</li>
+          <li><strong>Award:</strong> The arbitral award shall be final and binding on the parties, subject to rights and remedies available under applicable law.</li>
+          <li><strong>Costs:</strong> The arbitral tribunal may determine costs in accordance with applicable law.</li>
+          <li><strong>Interim Relief:</strong> Either party may seek interim, protective, or emergency relief from a court of competent jurisdiction before, during, or after arbitration, where permitted by law.</li>
+          <li><strong>Exclusive Jurisdiction:</strong> Subject to the arbitration provisions above and applicable law, the competent courts exercising jurisdiction over <strong>{{jurisdiction}}</strong> shall have exclusive jurisdiction over all matters arising out of or relating to this Agreement, including interim measures, appointment-related proceedings, enforcement, challenge, or execution of an arbitral award.</li>
+          <li><strong>Waiver of Litigation:</strong> The Participant agrees to refer arbitrable disputes to arbitration and shall not initiate ordinary court litigation except where arbitration is unavailable or court proceedings are permitted or required under applicable law.</li>
+        </ol>
+        <p><strong>10.4.</strong> Nothing in this Section shall exclude or limit either party’s rights or remedies under mandatory provisions of Indian law.</p>
+      </section>
+
+      <section>
+        <h2>11. Force Majeure</h2>
+        <p><strong>11.1.</strong> The Organiser shall not be liable for any failure, delay, suspension, or interruption of the Event caused by circumstances beyond its reasonable control. Such events shall not constitute frustration of contract or give rise to termination or refund rights.</p>
+        <p><strong>11.2.</strong> In the event of force majeure, the Organiser shall have the absolute discretion to postpone, reschedule, modify, relocate, shorten, suspend, neutralise results, or cancel the Event, without prior notice and without any obligation to provide refunds or compensation.</p>
+        <p><strong>11.3.</strong> The Participant expressly agrees that all registration fees and charges may be fully retained by the Organiser towards sunk costs and sponsor commitments.</p>
+        <p><strong>11.4.</strong> Continued participation following any change shall constitute unconditional acceptance of the revised Event.</p>
+      </section>
+
+      <section>
+        <h2>12. Severability and Enforcement</h2>
+        <p><strong>12.1.</strong> If any provision of this Agreement is held to be invalid, unenforceable or contrary to law, that specific provision shall be severed and deleted and all remaining provisions shall continue in full force and effect.</p>
+        <p><strong>12.2.</strong> All provisions of this Agreement shall survive termination, cancellation or completion of the Event.</p>
+        <p><strong>12.3.</strong> Failure or delay by the Organisers in enforcing any provision of this Agreement shall not constitute waiver of that provision or any other right.</p>
+      </section>
+
+      <section>
+        <h2>13. Minor Participants</h2>
+        <p><strong>13.1.</strong> If the Participant is a minor (below 18 years of age), the undersigned parent or legal guardian certifies that they have full authority to bind the minor and assumes full responsibility for the minor’s participation and conduct.</p>
+        <p><strong>13.2.</strong> The parent/guardian agrees that the minor shall comply with all rules and safety instructions. Non-compliance shall result in immediate disqualification without refund.</p>
+      </section>
+
+      <section>
+        <h2>14. Insurance and Liability Coverage</h2>
+        <p><strong>14.1.</strong> The Organisers maintains public liability insurance. This insurance does not cover the Participant and does not negate this Agreement’s provisions.</p>
+        <p><strong>14.2.</strong> The Participant is strongly advised to obtain personal accident/sports injury insurance covering their participation. The Organisers assumes no responsibility for the Participant’s medical or injury-related costs.</p>
+        <p><strong>14.3.</strong> All medical expenses incurred during or after the Event shall be borne solely by the Participant.</p>
+      </section>
+
+      <section>
+        <h2>15. Entire Agreement</h2>
+        <p><strong>15.1. Complete Understanding:</strong> This Agreement, along with any Event-specific rules posted on the Organiser’s website, constitutes the entire agreement between the parties.</p>
+        <p><strong>15.2.</strong> The Organiser reserves the right to amend, supplement, or modify any terms of this Agreement by posting updated terms on its website.</p>
+      </section>
+
+      <section class="certification">
+        <h2>I, the Undersigned, Hereby Certify That:</h2>
+        <ol>
+          <li>I have read, understood, and fully comprehend all terms, conditions, and disclaimers in this Indemnity Cum Waiver Agreement;</li>
+          <li>I have had adequate opportunity to seek independent legal, medical or financial advice before signing;</li>
+          <li>I understand that by signing, I am relinquishing valuable legal rights;</li>
+          <li>I voluntarily and knowingly assume all risks;</li>
+          <li>I indemnify and hold harmless the Released Parties from all claims whatsoever;</li>
+          <li>I acknowledge that this Agreement is binding on my heirs, executors, and assigns;</li>
+          <li>I irrevocably consent to arbitration and waive all rights to litigation;</li>
+          <li>I am medically fit and have disclosed all relevant health information;</li>
+          <li>I accept all terms as final and binding.</li>
+        </ol>
+      </section>
+
+      <section class="signature">
+        <div><span>Electronic Signature</span><strong>{{name}}</strong></div>
+        <div><span>Signed Date</span><strong>{{day}}, {{date}}</strong></div>
+        <div><span>Waiver Version</span><strong>{{waiver_version}}</strong></div>
+        <div><span>Waiver Audit ID</span><strong>{{waiver_id}}</strong></div>
+      </section>
+
+      <footer class="document-footer">Race Upshot · Athlete Waiver · Generated for {{eventname}}</footer>
+    </div>
+  </main>
+</body>
+</html>

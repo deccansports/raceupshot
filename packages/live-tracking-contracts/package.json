@@ -1,0 +1,19 @@
+{
+  "name": "@raceupshot/live-tracking-contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./contracts": "./src/contracts.ts",
+    "./course-normalizer": "./src/course-normalizer.ts",
+    "./course-validation": "./src/course-validation.ts",
+    "./countdown": "./src/countdown.ts",
+    "./identity": "./src/identity.ts",
+    "./runtime-contract": "./src/runtime-contract.ts",
+    "./section-state": "./src/section-state.ts",
+    "./storage-keys": "./src/storage-keys.ts",
+    "./time": "./src/time.ts",
+    "./versioning": "./src/versioning.ts"
+  }
+}

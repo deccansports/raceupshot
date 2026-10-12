@@ -1,0 +1,18 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "raceupshot-next-dev",
+  "compatibility_date": "2026-07-26",
+  "compatibility_flags": ["nodejs_compat"],
+  "kv_namespaces": [
+    {
+      "binding": "RACEUPSHOT",
+      "id": "5b3d551f610040fea615e8e2485c3a28"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "EVENT_MEDIA",
+      "bucket_name": "raceupshot-media"
+    }
+  ]
+}

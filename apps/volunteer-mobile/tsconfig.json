@@ -1,0 +1,14 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "jsx": "react-jsx"
+  },
+  "include": [
+    "App.tsx",
+    "index.js",
+    "src/**/*.ts",
+    "src/**/*.tsx"
+  ]
+}

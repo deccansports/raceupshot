@@ -1,0 +1,1 @@
+export { EventDetailsScreen as default } from '@/features/events/components/EventDetailsScreen';

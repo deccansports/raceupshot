@@ -1,0 +1,55 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "raceupshot",
+  "main": "cloudflare/worker-entry.ts",
+  "compatibility_date": "2026-07-26",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  "browser": {
+    "binding": "BROWSER"
+  },
+  "observability": {
+    "enabled": true,
+    "logs": { "head_sampling_rate": 1 }
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "CANONICAL_CHANGE_HUB", "class_name": "CanonicalChangeHub" },
+      { "name": "VOLUNTEER_OPERATIONS", "class_name": "VolunteerOperationCoordinator" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1-canonical-change-hub", "new_sqlite_classes": ["CanonicalChangeHub"] },
+    { "tag": "v2-volunteer-operation-coordinator", "new_sqlite_classes": ["VolunteerOperationCoordinator"] }
+  ],
+  "vars": {
+    "APP_ENV": "production",
+    "ADMIN_EMAIL": "info@raceupshot.com",
+    "BERGTECHNO_EMAIL_API_BASE_URL": "https://bergtecno.com/api",
+    "BERGTECHNO_EMAIL_API_KEY_HEADER": "x-api-key",
+    "BERGTECHNO_EMAIL_RAW_SEND_PATH": "/email/send",
+    "BERGTECHNO_EMAIL_TEMPLATE_SEND_PATH": "/email/send-template",
+    "BERGTECHNO_EMAIL_BULK_SEND_PATH": "/email/send-bulk",
+    "BERGTECHNO_SENDER_EMAIL": "info@raceupshot.com",
+    "BERGTECHNO_SENDER_NAME": "Race Upshot",
+    "BERGTECHNO_WHATSAPP_API_BASE_URL": "https://bergtecno.com/api",
+    "BERGTECHNO_WHATSAPP_API_KEY_HEADER": "x-api-key",
+    "BERGTECHNO_WHATSAPP_SEND_PATH": "/wa/send"
+  },
+  "kv_namespaces": [
+    {
+      "binding": "RACEUPSHOT",
+      "id": "5b3d551f610040fea615e8e2485c3a28",
+      "remote": true
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "EVENT_MEDIA",
+      "bucket_name": "raceupshot-media"
+    }
+  ]
+}
