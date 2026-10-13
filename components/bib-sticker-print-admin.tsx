@@ -139,6 +139,26 @@ export function BibStickerPrintAdmin({ events }: { events: RaceEvent[] }) {
     setTicketId(duplicateTicketId); setSubcategoryId(null); setTemplate(result.template); setDuplicateTicketId(""); setSelectedIds([]); setPreviewIndex(0);
     setSuccess(`Duplicated as ${result.template.name}.`);
   });
+  const deliverServerPdf = async (action: "pdf" | "single-pdf" | "four-up-pdf", batch: PrintBatch, purpose: "preview" | "download", popup: Window | null, fallbackFileName: string, expectedPages: number): Promise<string> => {
+    setExportProgress("Browser capture unavailable. Creating the PDF securely on the server…");
+    const response = await fetch(endpoint, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action, batch }) });
+    if (!response.ok) throw await responseError(response, "Server PDF fallback failed");
+    if (!response.headers.get("content-type")?.toLowerCase().includes("application/pdf")) throw new Error("The server PDF fallback returned an invalid document.");
+    const physicalPages = Number(response.headers.get("x-physical-pages"));
+    if (!physicalPages || physicalPages !== expectedPages) throw new Error("The fallback PDF page count does not match the selected print items.");
+    const url = URL.createObjectURL(new Blob([await response.arrayBuffer()], { type: "application/pdf" }));
+    if (purpose === "preview") {
+      if (!popup || popup.closed) { URL.revokeObjectURL(url); throw new Error("The PDF preview window was closed. Allow popups and try again."); }
+      popup.location.replace(url); popup.focus(); window.setTimeout(() => URL.revokeObjectURL(url), 10 * 60_000);
+    } else {
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = response.headers.get("content-disposition")?.match(/filename="([^"]+)"/)?.[1] || fallbackFileName;
+      anchor.style.display = "none"; document.body.appendChild(anchor); anchor.click(); anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    }
+    return response.headers.get("x-print-batch-hash") ?? "";
+  };
   const downloadSingleBib = () => void run("Creating single A5 BIB…", async () => {
     if (!template || template.templateType !== "BIB" || !example) throw new Error("Choose a BIB template and participant first.");
     const outputTemplate = await persistTemplateForOutput();
@@ -146,8 +166,14 @@ export function BibStickerPrintAdmin({ events }: { events: RaceEvent[] }) {
     if (!response.ok) throw await responseError(response, "Single BIB export failed");
     const html = await response.text();
     if (!response.headers.get("content-type")?.toLowerCase().includes("text/html") || !/^\s*<!doctype html>/i.test(html)) throw new Error("The server did not return a valid A5 print document.");
-    await downloadPrintDocumentPdf({ html, fileName: `Race_Upshot_BIB_${example.bibNumber}`, pageWidthMm: 148.5, pageHeightMm: 210 });
-    setSuccess(`Downloaded BIB ${example.bibNumber} as one portrait A5 PDF.`);
+    let fallback = false;
+    try {
+      await downloadPrintDocumentPdf({ html, fileName: `Race_Upshot_BIB_${example.bibNumber}`, pageWidthMm: 148.5, pageHeightMm: 210 });
+    } catch {
+      fallback = true;
+      await deliverServerPdf("single-pdf", { templateId: outputTemplate.id, mode: "SELECTED", selectedIds: [example.participantId], minBib: "", maxBib: "" }, "download", null, `Race_Upshot_BIB_${example.bibNumber}.pdf`, 1);
+    }
+    setSuccess(`Downloaded BIB ${example.bibNumber} as one portrait A5 PDF${fallback ? " using the compatible server renderer" : ""}.`);
   });
   const makePdf = (purpose: "preview" | "download" | "print", forceFourUp = false) => void run("Creating PDF…", async () => {
     if (!template || !data) throw new Error("Choose a template first.");
@@ -181,21 +207,28 @@ export function BibStickerPrintAdmin({ events }: { events: RaceEvent[] }) {
       const expectedPages = Number(response.headers.get("x-physical-pages"));
       if (!expectedPages || expectedPages !== targetPages) throw new Error("The generated page count does not match the selected print items. Nothing was downloaded.");
       setExportProgress(`Rendering 0 of ${targetPages} pages…`);
-      await downloadPrintDocumentPdf({
-        html,
-        fileName: `${data.event.name}_${outputTemplate.name}_${targetSelected.length}_${forceFourUp ? "4-Up_Bibs" : outputTemplate.templateType === "BIB" ? "Bibs" : "Stickers"}`,
-        pageWidthMm: outputLayout.pageWidthMm,
-        pageHeightMm: outputLayout.pageHeightMm,
-        outputMode: purpose === "preview" ? "open" : "download",
-        targetWindow: popup,
-        onProgress: (completed, total) => setExportProgress(`Rendering ${completed} of ${total} pages…`),
-      });
+      const fileName = `${data.event.name}_${outputTemplate.name}_${targetSelected.length}_${forceFourUp ? "4-Up_Bibs" : outputTemplate.templateType === "BIB" ? "Bibs" : "Stickers"}`;
+      let fallback = false;
+      try {
+        await downloadPrintDocumentPdf({
+          html, fileName,
+          pageWidthMm: outputLayout.pageWidthMm,
+          pageHeightMm: outputLayout.pageHeightMm,
+          outputMode: purpose === "preview" ? "open" : "download",
+          targetWindow: popup,
+          onProgress: (completed, total) => setExportProgress(`Rendering ${completed} of ${total} pages…`),
+        });
+      } catch {
+        fallback = true;
+        const fallbackHash = await deliverServerPdf(forceFourUp ? "four-up-pdf" : "pdf", targetBatch, purpose, popup, `${fileName}.pdf`, targetPages);
+        if (fallbackHash) setBatchHash(fallbackHash);
+      }
       setExportProgress("");
       if (purpose === "download") {
         setDownloaded(true);
-        setSuccess(`Downloaded all ${targetSelected.length} items on ${targetPages} physical page${targetPages === 1 ? "" : "s"}${forceFourUp ? " at four landscape A5 BIBs per 18 × 12 sheet" : ""}. Confirm printing only after the paper has printed.`);
+        setSuccess(`Downloaded all ${targetSelected.length} items on ${targetPages} physical page${targetPages === 1 ? "" : "s"}${forceFourUp ? " at four landscape A5 BIBs per 18 × 12 sheet" : ""}${fallback ? " using the compatible server renderer" : ""}. Confirm printing only after the paper has printed.`);
       } else {
-        setSuccess(`Opened a flattened ${targetPages}-page PDF preview.`);
+        setSuccess(`Opened a ${targetPages}-page PDF preview${fallback ? " using the compatible server renderer" : ""}.`);
       }
     } catch (cause) { popup?.close(); throw cause; }
     finally { setExportProgress(""); }

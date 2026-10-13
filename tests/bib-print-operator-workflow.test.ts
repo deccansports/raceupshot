@@ -37,6 +37,9 @@ describe("BERGMAN-inspired BIB and sticker operator workflow", () => {
     expect(pdf).toContain('import("html-to-image")');
     expect(pdf).toContain('import("jspdf")');
     expect(pdf).toContain("PDF_RASTER_DPI = 300");
+    expect(pdf).toContain("cloneWithComputedStyles");
+    expect(admin).toContain("deliverServerPdf");
+    expect(route).toContain('body.action === "four-up-pdf"');
   });
 
   it("enables every output action from the visible batch and auto-saves pending edits", () => {

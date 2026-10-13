@@ -26,8 +26,8 @@ function waitForFrameLoad(frame: HTMLIFrameElement): Promise<void> {
   });
 }
 
-async function waitForImages(document: Document): Promise<void> {
-  await Promise.all(Array.from(document.images).map(async (image) => {
+async function waitForImages(root: ParentNode): Promise<void> {
+  await Promise.all(Array.from(root.querySelectorAll<HTMLImageElement>("img")).map(async (image) => {
     if (!image.complete) {
       await new Promise<void>((resolve, reject) => {
         image.addEventListener("load", () => resolve(), { once: true });
@@ -46,7 +46,29 @@ function waitForPaint(frameWindow: Window): Promise<void> {
 function captureFailureMessage(error: unknown): string {
   if (error instanceof Error && error.message.trim()) return error.message.trim();
   if (typeof error === "string" && error.trim()) return error.trim();
+  if (typeof Event !== "undefined" && error instanceof Event) return `${error.type || "render"} event while drawing the print design`;
   return "The browser could not capture the print design.";
+}
+
+function cloneWithComputedStyles(source: HTMLElement, sourceWindow: Window): HTMLElement {
+  const clone = source.cloneNode(true) as HTMLElement;
+  const sourceNodes = [source, ...Array.from(source.querySelectorAll<HTMLElement>("*"))];
+  const cloneNodes = [clone, ...Array.from(clone.querySelectorAll<HTMLElement>("*"))];
+  for (let index = 0; index < sourceNodes.length; index += 1) {
+    const computed = sourceWindow.getComputedStyle(sourceNodes[index]);
+    const target = cloneNodes[index];
+    if (!target) continue;
+    for (const property of Array.from(computed)) target.style.setProperty(property, computed.getPropertyValue(property), computed.getPropertyPriority(property));
+  }
+  const bounds = source.getBoundingClientRect();
+  clone.style.setProperty("position", "relative", "important");
+  clone.style.setProperty("left", "0", "important");
+  clone.style.setProperty("top", "0", "important");
+  clone.style.setProperty("margin", "0", "important");
+  clone.style.setProperty("transform", "none", "important");
+  clone.style.setProperty("width", `${bounds.width}px`, "important");
+  clone.style.setProperty("height", `${bounds.height}px`, "important");
+  return clone;
 }
 
 function safePdfFileName(fileName: string): string {
@@ -96,13 +118,28 @@ export async function downloadPrintDocumentPdf(options: DownloadPrintPdfOptions)
     async function capture(element: HTMLElement, pageNumber: number): Promise<string> {
       const bounds = element.getBoundingClientRect();
       if (bounds.width < 1 || bounds.height < 1) throw new Error("The printable page has no visible size. Refresh the page and try again.");
+      const primaryOptions = { backgroundColor: "#ffffff", cacheBust: false, pixelRatio: PDF_RASTER_DPI / CSS_PIXELS_PER_INCH, quality: 0.94, width: Math.ceil(bounds.width), height: Math.ceil(bounds.height), fontEmbedCSS: "" } as const;
       try {
-        return await toJpeg(element, { backgroundColor: "#ffffff", cacheBust: false, pixelRatio: PDF_RASTER_DPI / CSS_PIXELS_PER_INCH, quality: 0.94, width: Math.ceil(bounds.width), height: Math.ceil(bounds.height) });
+        return await toJpeg(element, primaryOptions);
       } catch (firstError) {
         try {
-          return await toJpeg(element, { backgroundColor: "#ffffff", cacheBust: false, pixelRatio: 2, quality: 0.92, skipFonts: true, width: Math.ceil(bounds.width), height: Math.ceil(bounds.height) });
+          const sourceWindow = element.ownerDocument.defaultView;
+          if (!sourceWindow) throw firstError;
+          const captureHost = document.createElement("div");
+          captureHost.setAttribute("aria-hidden", "true");
+          captureHost.style.cssText = `position:fixed;left:-100000px;top:0;width:${Math.ceil(bounds.width)}px;height:${Math.ceil(bounds.height)}px;overflow:hidden;background:#fff;pointer-events:none`;
+          const clone = cloneWithComputedStyles(element, sourceWindow);
+          captureHost.appendChild(clone);
+          document.body.appendChild(captureHost);
+          try {
+            await waitForImages(captureHost);
+            await waitForPaint(window);
+            return await toJpeg(clone, { ...primaryOptions, pixelRatio: 2, quality: 0.92, skipFonts: true });
+          } finally {
+            captureHost.remove();
+          }
         } catch (retryError) {
-          throw new Error(`Could not capture print page ${pageNumber}: ${captureFailureMessage(retryError || firstError)}`);
+          throw new Error(`Could not capture print page ${pageNumber}: ${captureFailureMessage(retryError)}. Initial capture: ${captureFailureMessage(firstError)}.`);
         }
       }
     }

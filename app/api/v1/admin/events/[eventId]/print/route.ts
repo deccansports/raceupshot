@@ -36,18 +36,22 @@ export async function POST(request: Request, { params }: { params: Promise<{ eve
         template: await duplicatePrintTemplate(eventId, body.sourceTemplateId, body.targetTicketId, body.targetSubcategoryId ?? null),
       }, { headers: { "cache-control": "private, no-store" } });
     }
-    if ((body.action === "pdf" || body.action === "single-pdf" || body.action === "single-print" || body.action === "four-up-print" || body.action === "print" || body.action === "audit") && body.batch) {
+    if ((body.action === "pdf" || body.action === "single-pdf" || body.action === "four-up-pdf" || body.action === "single-print" || body.action === "four-up-print" || body.action === "print" || body.action === "audit") && body.batch) {
       const { event, template, participants } = await resolvePrintBatch(eventId, body.batch);
       const signatureInput = JSON.stringify({ eventId: event.id, templateId: template.id, version: template.version, ids: participants.map((item) => item.participantId) });
       const batchHash = [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(signatureInput)))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-      if (body.action === "pdf" || body.action === "single-pdf") {
+      if (body.action === "pdf" || body.action === "single-pdf" || body.action === "four-up-pdf") {
         if (body.action === "single-pdf" && (template.templateType !== "BIB" || participants.length !== 1)) return apiFailure("Single A5 export requires exactly one BIB participant.", 400);
-        const outputTemplate = body.action === "single-pdf" ? { ...template, paperPreset: "A5" as const } : template;
+        if (body.action === "four-up-pdf" && template.templateType !== "BIB") return apiFailure("Four-up export is available only for BIB templates.", 400);
+        const outputTemplate = body.action === "single-pdf"
+          ? { ...template, paperPreset: "A5" as const }
+          : body.action === "four-up-pdf" ? { ...template, paperPreset: "12X18" as const } : template;
+        const outputLayout = fixedPrintLayout(outputTemplate.paperPreset, outputTemplate.templateType);
         const bytes = await generatePrintPdf(outputTemplate, participants);
         const safeName = (body.action === "single-pdf"
           ? `${event.name}_BIB_${participants[0].bibNumber}_${participants[0].name}`
-          : `${event.name}_${template.name}_${participants.length}_${template.templateType === "BIB" ? "Bibs" : "Stickers"}`).replace(/[^a-zA-Z0-9_-]+/g, "_").slice(0, 120);
-        return new Response(bytes as BodyInit, { headers: { "content-type": "application/pdf", "content-disposition": `attachment; filename="${safeName}.pdf"`, "cache-control": "private, no-store", "x-print-batch-hash": batchHash, "x-physical-pages": String(Math.ceil(participants.length / fixedPrintLayout(template.paperPreset, template.templateType).itemsPerPage)) } });
+          : `${event.name}_${template.name}_${participants.length}_${body.action === "four-up-pdf" ? "4-Up_Bibs" : template.templateType === "BIB" ? "Bibs" : "Stickers"}`).replace(/[^a-zA-Z0-9_-]+/g, "_").slice(0, 120);
+        return new Response(bytes as BodyInit, { headers: { "content-type": "application/pdf", "content-disposition": `attachment; filename="${safeName}.pdf"`, "cache-control": "private, no-store", "x-print-batch-hash": batchHash, "x-physical-pages": String(Math.ceil(participants.length / outputLayout.itemsPerPage)) } });
       }
       if (body.action === "print" || body.action === "single-print" || body.action === "four-up-print") {
         if (body.action === "single-print" && (template.templateType !== "BIB" || participants.length !== 1)) return apiFailure("Single A5 export requires exactly one BIB participant.", 400);
