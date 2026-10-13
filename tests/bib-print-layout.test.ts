@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 import { defaultPrintTemplate, fixedPrintLayout, matchesPrintGender, printPages, renderPrintHtml, repairStandardA5Template, selectPrintParticipants, sortParticipantsByBib, TWELVE_BY_EIGHTEEN_FOUR_A5_LAYOUT, type PrintParticipant } from "../lib/bib-print-layout";
 import { fourUpBibPlacement } from "../lib/bib-print-pdf";
@@ -44,11 +45,22 @@ describe("BIB print layout", () => {
     expect((html.match(/class="print-item blank"/g) ?? [])).toHaveLength(3);
     expect([...html.matchAll(/data-participant-id="([^"]+)"/g)].map((match) => match[1])).toEqual(["participant-1", "participant-2", "participant-3", "participant-4", "participant-5"]);
   });
-  it("preserves a 100px BIB font in the four-up print document", () => {
+  it("preserves a quoted font family, 100px size, and white BIB color in the four-up print document", () => {
     const template = defaultPrintTemplate("event-1", "olympic", "BIB");
-    template.elements.find((element) => element.kind === "BIB_NUMBER")!.fontSize = 100;
+    const bib = template.elements.find((element) => element.kind === "BIB_NUMBER")!;
+    bib.fontFamily = '"Monument Extended", "Arial Black", sans-serif';
+    bib.fontSize = 100;
+    bib.color = "#ffffff";
     const html = renderPrintHtml({ template, participants: [athlete("3001")] });
-    expect(html).toMatch(/font-size:100px[^>]*>3001<\/div>/);
+    expect(html).toContain("font-family:&quot;Monument Extended&quot;, &quot;Arial Black&quot;, sans-serif;font-size:100px");
+    expect(html).toMatch(/font-size:100px[^>]*color:#ffffff[^>]*>3001<\/div>/);
+    expect(html).not.toContain('font-family:"Monument Extended"');
+    const parsed = document.implementation.createHTMLDocument();
+    parsed.documentElement.innerHTML = html;
+    const renderedBib = parsed.querySelector<HTMLElement>('[data-participant-id="participant-3001"] .print-element');
+    expect(renderedBib?.style.fontFamily).toBe('"Monument Extended", "Arial Black", sans-serif');
+    expect(renderedBib?.style.fontSize).toBe("100px");
+    expect(renderedBib?.style.color).toBe("rgb(255, 255, 255)");
   });
   it("sorts BIBs naturally and excludes inactive and cross-scope records", () => {
     const roster = [athlete("A10"), athlete("10"), athlete("A2"), athlete("2"), athlete("20", { registrationStatus: "refunded" }), athlete("21", { registrationStatus: "transferred-out" }), athlete("22", { registrationStatus: "cancelled" }), athlete("23", { eventId: "other" }), athlete("24", { ticketId: "other" }), athlete("25", { subcategoryId: "other" })];

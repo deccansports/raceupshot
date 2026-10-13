@@ -250,8 +250,9 @@ export function renderPrintHtml(input: { template: PrintTemplate; participants: 
     const elements = template.elements.map((element) => {
       const value = printElementText(element, participant);
       const font = PRINT_FONT_FAMILIES.includes(element.fontFamily as (typeof PRINT_FONT_FAMILIES)[number]) ? element.fontFamily : "Arial, sans-serif";
+      const htmlFont = escapePrintHtml(font);
       const color = /^#[0-9a-fA-F]{6}$/.test(element.color) ? element.color : "#111827";
-      const style = `left:${element.x}%;top:${element.y}%;width:${element.width}%;height:${element.height}%;transform:rotate(${element.rotation}deg);font-family:${font};font-size:${element.fontSize}px;font-weight:${element.fontWeight};font-style:${element.italic ? "italic" : "normal"};text-decoration:${element.underline ? "underline" : "none"};color:${color};text-align:${element.align};letter-spacing:${element.letterSpacing}px;line-height:${element.lineHeight ?? 1.05};justify-content:${element.verticalAlign === "top" ? "flex-start" : element.verticalAlign === "bottom" ? "flex-end" : "center"};`;
+      const style = `left:${element.x}%;top:${element.y}%;width:${element.width}%;height:${element.height}%;transform:rotate(${element.rotation}deg);font-family:${htmlFont};font-size:${element.fontSize}px;font-weight:${element.fontWeight};font-style:${element.italic ? "italic" : "normal"};text-decoration:${element.underline ? "underline" : "none"};color:${color};text-align:${element.align};letter-spacing:${element.letterSpacing}px;line-height:${element.lineHeight ?? 1.05};justify-content:${element.verticalAlign === "top" ? "flex-start" : element.verticalAlign === "bottom" ? "flex-end" : "center"};`;
       if (["RECTANGLE", "ELLIPSE", "LINE"].includes(element.kind)) {
         const fill = /^#[0-9a-fA-F]{6}$/.test(element.fillColor ?? "") ? element.fillColor : "#ffffff";
         const stroke = /^#[0-9a-fA-F]{6}$/.test(element.strokeColor ?? "") ? element.strokeColor : "#111827";
