@@ -15,7 +15,7 @@ type Audit = {
 };
 type PrintData = { event: { id: string; name: string }; participants: PrintParticipant[]; templates: PrintTemplate[]; audits: Audit[] };
 type Mode = "ALL" | "RANGE" | "SELECTED" | "NOT_PRINTED" | "REPRINT";
-type PrintBatch = { templateId: string; mode: Mode; selectedIds: string[]; minBib: string; maxBib: string };
+type PrintBatch = { templateId: string; mode: Mode; selectedIds: string[]; minBib: string; maxBib: string; templateSnapshot?: PrintTemplate };
 const fields: PrintElementKind[] = ["BIB_NUMBER", "PARTICIPANT_NAME", "FIRST_NAME", "LAST_NAME", "RACE_CATEGORY", "SUBCATEGORY", "GENDER", "AGE_GROUP", "GENDER_AGE_GROUP", "CLUB_NAME", "COUNTRY_FLAG", "TSHIRT_SIZE", "EMERGENCY_CONTACT", "TIMING_CHIP", "ATHLETE_BAND_CODE", "PARTICIPANT_QR", "ATHLETE_BAND_QR", "BARCODE", "STATIC_TEXT", "STATIC_IMAGE"];
 const shapes: PrintElementKind[] = ["RECTANGLE", "ELLIPSE", "LINE"];
 const bibShortcuts: ReadonlyArray<readonly [PrintElementKind, string]> = [
@@ -162,7 +162,8 @@ export function BibStickerPrintAdmin({ events }: { events: RaceEvent[] }) {
   const downloadSingleBib = () => void run("Creating single A5 BIB…", async () => {
     if (!template || template.templateType !== "BIB" || !example) throw new Error("Choose a BIB template and participant first.");
     const outputTemplate = await persistTemplateForOutput();
-    const response = await fetch(endpoint, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "single-print", batch: { templateId: outputTemplate.id, mode: "SELECTED", selectedIds: [example.participantId], minBib: "", maxBib: "" } }) });
+    const singleBatch: PrintBatch = { templateId: outputTemplate.id, mode: "SELECTED", selectedIds: [example.participantId], minBib: "", maxBib: "", templateSnapshot: outputTemplate };
+    const response = await fetch(endpoint, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "single-print", batch: singleBatch }) });
     if (!response.ok) throw await responseError(response, "Single BIB export failed");
     const html = await response.text();
     if (!response.headers.get("content-type")?.toLowerCase().includes("text/html") || !/^\s*<!doctype html>/i.test(html)) throw new Error("The server did not return a valid A5 print document.");
@@ -171,7 +172,7 @@ export function BibStickerPrintAdmin({ events }: { events: RaceEvent[] }) {
       await downloadPrintDocumentPdf({ html, fileName: `Race_Upshot_BIB_${example.bibNumber}`, pageWidthMm: 148.5, pageHeightMm: 210 });
     } catch {
       fallback = true;
-      await deliverServerPdf("single-pdf", { templateId: outputTemplate.id, mode: "SELECTED", selectedIds: [example.participantId], minBib: "", maxBib: "" }, "download", null, `Race_Upshot_BIB_${example.bibNumber}.pdf`, 1);
+      await deliverServerPdf("single-pdf", singleBatch, "download", null, `Race_Upshot_BIB_${example.bibNumber}.pdf`, 1);
     }
     setSuccess(`Downloaded BIB ${example.bibNumber} as one portrait A5 PDF${fallback ? " using the compatible server renderer" : ""}.`);
   });
@@ -182,7 +183,7 @@ export function BibStickerPrintAdmin({ events }: { events: RaceEvent[] }) {
     if (purpose !== "download" && !popup) throw new Error("Popup blocked. Allow popups to preview or print the PDF.");
     try {
       const outputTemplate = await persistTemplateForOutput();
-      const targetBatch: PrintBatch = { templateId: outputTemplate.id, mode, selectedIds, minBib, maxBib };
+      const targetBatch: PrintBatch = { templateId: outputTemplate.id, mode, selectedIds, minBib, maxBib, templateSnapshot: outputTemplate };
       const targetSelected = selectPrintParticipants({ roster: data.participants, eventId: data.event.id, ticketId: outputTemplate.ticketId, subcategoryId: outputTemplate.subcategoryId, mode, selectedIds, minBib, maxBib, previouslyPrintedIds: printed }).filter((row) => matchesPrintGender(row.gender, outputTemplate.genderScope));
       const response = await fetch(endpoint, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: forceFourUp ? "four-up-print" : "print", batch: targetBatch }) });
       if (!response.ok) throw await responseError(response, "Print preparation failed");

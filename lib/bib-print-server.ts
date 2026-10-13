@@ -81,7 +81,7 @@ function validElement(element: PrintTemplateElement): boolean {
     && (!element.imageDataUrl || Boolean(validatedPrintImage(element.imageDataUrl)));
 }
 
-export async function savePrintTemplate(eventId: string, input: PrintTemplate): Promise<PrintTemplate> {
+function assertValidTemplateInput(eventId: string, input: PrintTemplate): void {
   if (input.eventId !== eventId || !input.ticketId || !input.name?.trim() || input.name.length > 100) throw new Error("A valid event, category and template name are required.");
   if (!["BIB", "STICKER"].includes(input.templateType) || !["ALL", "MALE", "FEMALE"].includes(input.genderScope)) throw new Error("Invalid template scope.");
   if (input.templateType === "BIB" && !["A5", "A4_SINGLE_A5", "A4", "12X18", "12X8"].includes(input.paperPreset)) throw new Error("Invalid BIB paper preset.");
@@ -89,6 +89,10 @@ export async function savePrintTemplate(eventId: string, input: PrintTemplate): 
   if (!Array.isArray(input.elements) || input.elements.length > 50 || !input.elements.every(validElement)) throw new Error("A design element is invalid or outside the canvas.");
   validatedPrintImage(input.backgroundDataUrl);
   if (JSON.stringify(input).length > 4_000_000) throw new Error("Template artwork is too large. Use smaller images.");
+}
+
+export async function savePrintTemplate(eventId: string, input: PrintTemplate): Promise<PrintTemplate> {
+  assertValidTemplateInput(eventId, input);
   const roster = await printRoster(eventId);
   const configured = await configuredTicketIds(roster.event.id);
   if (!configured.has(input.ticketId) && !roster.participants.some((row) => row.ticketId === input.ticketId)) throw new Error("Category is not configured for this event.");
@@ -152,12 +156,24 @@ export async function auditRequest(eventId: string, path: string, method: "GET" 
 export interface PrintBatchRequest {
   templateId: string; mode: "ALL" | "RANGE" | "SELECTED" | "NOT_PRINTED" | "REPRINT";
   selectedIds?: string[]; minBib?: string; maxBib?: string;
+  /** Exact validated save response used by the editor, avoiding a stale KV read during immediate export. */
+  templateSnapshot?: PrintTemplate;
 }
 
 export async function resolvePrintBatch(eventId: string, request: PrintBatchRequest) {
   const roster = await printRoster(eventId);
-  const template = (await listPrintTemplates(roster.event.id)).find((item) => item.id === request.templateId);
-  if (!template || !template.active) throw new Error("Choose an active saved template.");
+  const storedTemplate = (await listPrintTemplates(roster.event.id)).find((item) => item.id === request.templateId);
+  if (!storedTemplate || !storedTemplate.active) throw new Error("Choose an active saved template.");
+  let template = storedTemplate;
+  if (request.templateSnapshot) {
+    const snapshot = request.templateSnapshot;
+    assertValidTemplateInput(roster.event.id, snapshot);
+    if (snapshot.id !== request.templateId || snapshot.id !== storedTemplate.id || !snapshot.active) throw new Error("The saved print template does not match this batch.");
+    const configured = await configuredTicketIds(roster.event.id);
+    if (!configured.has(snapshot.ticketId) && !roster.participants.some((row) => row.ticketId === snapshot.ticketId)) throw new Error("Category not found in this event.");
+    if (snapshot.subcategoryId && !roster.participants.some((row) => row.ticketId === snapshot.ticketId && row.subcategoryId === snapshot.subcategoryId)) throw new Error("Subcategory is not present in this event roster.");
+    template = { ...snapshot, paperPreset: fixedPrintLayout(snapshot.paperPreset, snapshot.templateType).paperPreset };
+  }
   const audits = await auditRequest(roster.event.id, "audits", "GET");
   const printed = new Set((audits.records ?? []).filter((row) => (row as { templateType?: string }).templateType === template.templateType).map((row) => (row as { participantId: string }).participantId));
   const participants = selectPrintParticipants({ roster: roster.participants, eventId: roster.event.id, ticketId: template.ticketId, subcategoryId: template.subcategoryId, mode: request.mode, selectedIds: request.selectedIds, minBib: request.minBib, maxBib: request.maxBib, previouslyPrintedIds: printed })

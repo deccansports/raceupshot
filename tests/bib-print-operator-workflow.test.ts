@@ -49,4 +49,10 @@ describe("BERGMAN-inspired BIB and sticker operator workflow", () => {
     expect(admin).not.toContain("!allEligible.length");
     expect(admin).not.toContain('purpose === "download" ? "ALL" : mode');
   });
+
+  it("renders the exact saved template snapshot instead of a briefly stale KV version", () => {
+    expect(admin).toContain("templateSnapshot: outputTemplate");
+    expect(server).toContain("request.templateSnapshot");
+    expect(server).toContain("assertValidTemplateInput(roster.event.id, snapshot)");
+  });
 });

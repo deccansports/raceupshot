@@ -44,6 +44,12 @@ describe("BIB print layout", () => {
     expect((html.match(/class="print-item blank"/g) ?? [])).toHaveLength(3);
     expect([...html.matchAll(/data-participant-id="([^"]+)"/g)].map((match) => match[1])).toEqual(["participant-1", "participant-2", "participant-3", "participant-4", "participant-5"]);
   });
+  it("preserves a 100px BIB font in the four-up print document", () => {
+    const template = defaultPrintTemplate("event-1", "olympic", "BIB");
+    template.elements.find((element) => element.kind === "BIB_NUMBER")!.fontSize = 100;
+    const html = renderPrintHtml({ template, participants: [athlete("3001")] });
+    expect(html).toMatch(/font-size:100px[^>]*>3001<\/div>/);
+  });
   it("sorts BIBs naturally and excludes inactive and cross-scope records", () => {
     const roster = [athlete("A10"), athlete("10"), athlete("A2"), athlete("2"), athlete("20", { registrationStatus: "refunded" }), athlete("21", { registrationStatus: "transferred-out" }), athlete("22", { registrationStatus: "cancelled" }), athlete("23", { eventId: "other" }), athlete("24", { ticketId: "other" }), athlete("25", { subcategoryId: "other" })];
     expect(sortParticipantsByBib(roster.slice(0, 4)).map((row) => row.bibNumber)).toEqual(["2", "10", "A2", "A10"]);
