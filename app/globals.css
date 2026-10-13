@@ -3417,6 +3417,9 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .bib-print-controls label,.bib-print-editor label,.bib-print-confirm label { display: grid; gap: .35rem; font-size: .85rem; font-weight: 650; }
 .bib-print-controls input,.bib-print-controls select,.bib-print-editor input,.bib-print-editor select,.bib-print-confirm input { width: 100%; min-height: 40px; padding: .5rem .65rem; border: 1px solid var(--border, #cbd5e1); border-radius: .45rem; background: var(--background, #fff); color: inherit; }
 .bib-print-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .65rem; margin: 1rem 0; }
+.bib-print-actions .button:not(.button-primary) { border: 1px solid var(--line); color: var(--ink); background: #fff; }
+.bib-print-actions .button:hover:not(:disabled) { border-color: var(--blue); transform: translateY(-1px); }
+.bib-print-actions .button:disabled { opacity: .45; cursor: not-allowed; transform: none; }
 .bib-print-type-tabs { display: inline-flex; width: fit-content; gap: .35rem; margin-top: 1rem; padding: .3rem; border: 1px solid var(--border, #dbe2ea); border-radius: .75rem; background: #f8fafc; }
 .bib-print-type-tabs button { min-height: 38px; padding: .45rem .9rem; border: 0; border-radius: .55rem; background: transparent; color: #64748b; font: inherit; font-weight: 750; cursor: pointer; }
 .bib-print-type-tabs button.active { background: #111827; color: #fff; box-shadow: 0 2px 7px #11182726; }
