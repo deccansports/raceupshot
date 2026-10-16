@@ -2,7 +2,7 @@
 
 import {
   Activity, BookOpen, ClipboardList, FileBadge2, FileText, Import, LayoutDashboard,
-  Medal, Megaphone, Radio, Search, Settings, Shield, Tv, UserRoundCheck, Video, X,
+  Medal, Megaphone, Radio, RadioTower, Search, Settings, Shield, Tv, UserRoundCheck, Video, X,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
@@ -12,6 +12,7 @@ const items = [
   { icon: LayoutDashboard, label: "Dashboard", href: "/admin", group: "Race operations", keywords: "overview control centre" },
   { icon: BookOpen, label: "Events & registration", href: "/admin/events-registration", group: "Race operations", keywords: "events create edit course maps platform registrations event info participants results certificates bulk upload" },
   { icon: Radio, label: "Live tracking", href: "/admin/live-timing", group: "Race operations", keywords: "feibot timing athletes leaderboard course maps" },
+  { icon: RadioTower, label: "RFID Chip Encoder", href: "/admin/rfid-encoder", group: "Race operations", keywords: "ru5600 epc tag chip reader writer bulk encoding inventory" },
   { icon: Video, label: "Live broadcast", href: "/admin/live-broadcast", group: "Race operations", keywords: "stream cameras cloudflare video recordings" },
   { icon: Tv, label: "Finish Line LED", href: "/admin/finish-line-led", group: "Race operations", keywords: "display finishers screen" },
   { icon: UserRoundCheck, label: "Volunteers", href: "/admin/volunteers", group: "Race operations", keywords: "volunteer assignments check-in manual timing timing points activity" },

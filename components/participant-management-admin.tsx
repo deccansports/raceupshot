@@ -5,7 +5,7 @@ import type { RaceEvent } from "@/lib/types";
 import { ImportFlow } from "./import-flow";
 import {
   CalendarDays, CheckCircle2, Download, ExternalLink, Eye, FileText, Hash, IdCard,
-  LoaderCircle, Mail, MapPin, Pencil, Phone, RefreshCw, RotateCcw, Save, Search, ShieldCheck,
+  LoaderCircle, Mail, MapPin, Pencil, Phone, RefreshCw, RotateCcw, Search, ShieldCheck,
   Shirt, Trash2, UploadCloud, UserRound, UsersRound, X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -118,7 +118,7 @@ interface ParticipantDetailData {
     mobile: string | null; emergencyContact: string | null; address: string | null; city: string | null;
     state: string | null; country: string | null; pincode: string | null; bloodGroup: string | null;
     tshirtSize: string | null; athleteBandCode: string | null; idProofUrl: string | null;
-    waiverDocumentUrl: string | null; filledFormUrl: string | null; signatureName: string | null;
+    waiverDocumentUrl: string | null; waiverDocumentAvailable: boolean; filledFormUrl: string | null; signatureName: string | null;
     invoiceNumber: string | null; waiverStatus: string | null; checkedInAt: string | null;
     checkedInBy: string | null; waiverVerifiedAt: string | null; rulesAccepted: boolean | null;
     cutoffAccepted: boolean | null; cancellationPolicyAccepted: boolean | null; marketingConsent: boolean | null;
@@ -129,7 +129,7 @@ interface ParticipantDetailData {
     bikeRack: string | null; updatedBy: string | null;
   };
 }
-type PageSize = 25 | 50 | 100 | "ALL";
+const PARTICIPANTS_PER_PAGE = 50;
 
 const visibilityOptions: Array<{ value: AthleteVisibility | null; label: string }> = [
   { value: null, label: "Athlete setting" },
@@ -161,13 +161,10 @@ export function ParticipantManagementAdmin({ events }: { events: RaceEvent[] }) 
   const [status, setStatus] = useState("ALL");
   const [ageGroup, setAgeGroup] = useState("ALL");
   const [visibility, setVisibility] = useState("ALL");
-  const [pageSize, setPageSize] = useState<PageSize>(50);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(Boolean(eventId));
   const [saving, setSaving] = useState("");
-  const [editingId, setEditingId] = useState("");
-  const [chipCode, setChipCode] = useState("");
-  const [athleteBandCode, setAthleteBandCode] = useState("");
+  const [assignmentEdit, setAssignmentEdit] = useState<{ kind: "chip" | "athlete-band"; participantId: string; bib: string; name: string; value: string; currentValue: string } | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [selectedRow, setSelectedRow] = useState<ParticipantRow | null>(null);
@@ -180,6 +177,8 @@ export function ParticipantManagementAdmin({ events }: { events: RaceEvent[] }) 
   const [deleteRow, setDeleteRow] = useState<ParticipantRow | null>(null);
   const [deleteAllOpen, setDeleteAllOpen] = useState(false);
   const [deleteSelectedOpen, setDeleteSelectedOpen] = useState(false);
+  const [deleteTicketOpen, setDeleteTicketOpen] = useState(false);
+  const [deleteTicketId, setDeleteTicketId] = useState("");
   const [selectedParticipantIds, setSelectedParticipantIds] = useState<string[]>([]);
   const [deleteConfirmation, setDeleteConfirmation] = useState("");
   const [mutationBusy, setMutationBusy] = useState(false);
@@ -220,8 +219,10 @@ export function ParticipantManagementAdmin({ events }: { events: RaceEvent[] }) 
         && (visibility === "ALL" || (row.override || participant.visibility) === visibility);
     });
   }, [ageGroup, category, data, query, status, visibility]);
-  const totalPages = pageSize === "ALL" ? 1 : Math.max(1, Math.ceil(filtered.length / pageSize));
-  const visibleRows = pageSize === "ALL" ? filtered : filtered.slice((Math.min(page, totalPages) - 1) * pageSize, Math.min(page, totalPages) * pageSize);
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PARTICIPANTS_PER_PAGE));
+  const currentPage = Math.min(page, totalPages);
+  const firstVisibleRow = (currentPage - 1) * PARTICIPANTS_PER_PAGE;
+  const visibleRows = filtered.slice(firstVisibleRow, firstVisibleRow + PARTICIPANTS_PER_PAGE);
   const filteredIds = filtered.map((row) => row.participant.participantUid);
   const selectedIdSet = new Set(selectedParticipantIds);
   const allFilteredSelected = filteredIds.length > 0 && filteredIds.every((id) => selectedIdSet.has(id));
@@ -229,11 +230,15 @@ export function ParticipantManagementAdmin({ events }: { events: RaceEvent[] }) 
   const assignedChips = data?.rows.filter((row) => row.chipCode).length || 0;
   const assignedBands = data?.rows.filter((row) => row.athleteBandCode).length || 0;
   const selectedEvent = events.find((event) => event.id === eventId);
-  const eventTickets = selectedEvent?.tickets?.length ? selectedEvent.tickets : (selectedEvent?.categories ?? []).map((name) => ({ id: name, name }));
+  const eventTickets = selectedEvent?.ticketDefinitions?.length
+    ? selectedEvent.ticketDefinitions.map((ticket) => ({ id: ticket.id, name: ticket.name }))
+    : selectedEvent?.tickets?.length ? selectedEvent.tickets : (selectedEvent?.categories ?? []).map((name) => ({ id: name, name }));
+  const deleteTicket = eventTickets.find((ticket) => ticket.id === deleteTicketId) ?? null;
+  const deleteTicketRows = deleteTicket ? (data?.rows ?? []).filter((row) => row.ticketId === deleteTicket.id || (!row.ticketId && row.ticketName === deleteTicket.name)) : [];
 
   function resetFilters(nextEventId?: string) {
-    setQuery(""); setCategory("ALL"); setStatus("ALL"); setAgeGroup("ALL"); setVisibility("ALL"); setPage(1); setEditingId(""); setMessage(""); setError("");
-    if (nextEventId !== undefined) { activeEventId.current = nextEventId; setData(null); setEventId(nextEventId); setUploadOpen(false); setEditRow(null); setDeleteRow(null); setDeleteAllOpen(false); setDeleteSelectedOpen(false); setSelectedParticipantIds([]); }
+    setQuery(""); setCategory("ALL"); setStatus("ALL"); setAgeGroup("ALL"); setVisibility("ALL"); setPage(1); setAssignmentEdit(null); setMessage(""); setError("");
+    if (nextEventId !== undefined) { activeEventId.current = nextEventId; setData(null); setEventId(nextEventId); setUploadOpen(false); setEditRow(null); setDeleteRow(null); setDeleteAllOpen(false); setDeleteSelectedOpen(false); setDeleteTicketOpen(false); setDeleteTicketId(""); setSelectedParticipantIds([]); }
   }
 
   function openEdit(row: ParticipantRow) {
@@ -259,7 +264,6 @@ export function ParticipantManagementAdmin({ events }: { events: RaceEvent[] }) 
   async function saveParticipant() {
     if (!editRow || !editDraft) return;
     if (!editDraft.bib.trim() || !editDraft.name.trim() || !editDraft.ticketId) { setError("BIB, athlete name, and event ticket are required."); return; }
-    if (editRow.chipCode && !editDraft.chipCode.trim()) { setError("Timing chips cannot be cleared. Enter the current chip code or cancel the edit."); return; }
     setMutationBusy(true); setError(""); setMessage("");
     try {
       const { chipCode: nextChipValue, athleteBandCode: nextBandValue, ...registrationDraft } = editDraft;
@@ -268,31 +272,36 @@ export function ParticipantManagementAdmin({ events }: { events: RaceEvent[] }) 
       });
       const payload = await response.json() as { ok?: boolean; error?: string };
       if (!response.ok || !payload.ok) throw new Error(payload.error || "Unable to save participant.");
-      const nextChip = nextChipValue.trim(); const nextBand = nextBandValue.trim();
+      const nextChip = nextChipValue.trim().replace(/\s+/g, "").toUpperCase();
+      const nextBand = nextBandValue.trim().replace(/\s+/g, "").toUpperCase();
       if (nextChip !== editRow.chipCode) await patchAssignment("chip", editRow.participant.participantUid, { chipCode: nextChip });
       if (nextBand !== editRow.athleteBandCode) await patchAssignment("athlete-band", editRow.participant.participantUid, { athleteBandCode: nextBand });
       setEditRow(null); setEditDraft(null); setMessage(`Updated BIB ${editDraft.bib}.`); await load();
+      applyAssignmentValues(editRow.participant.participantUid, nextChip, nextBand);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to save participant."); }
     finally { setMutationBusy(false); }
   }
 
   async function confirmDelete() {
-    if (!data || (!deleteRow && !deleteAllOpen && !deleteSelectedOpen)) return;
+    if (!data || (!deleteRow && !deleteAllOpen && !deleteSelectedOpen && !deleteTicketOpen)) return;
     const all = deleteAllOpen;
     const selected = deleteSelectedOpen;
-    const required = all ? data.event.name : selected ? "DELETE" : deleteRow?.participant.bib || "";
+    const ticket = deleteTicketOpen ? deleteTicket : null;
+    if (deleteTicketOpen && !ticket) { setError("Select an event ticket to delete."); return; }
+    const required = all ? data.event.name : selected ? "DELETE" : ticket ? ticket.name : deleteRow?.participant.bib || "";
     if (deleteConfirmation !== required) { setError(`Type ${required} exactly to confirm.`); return; }
     setMutationBusy(true); setError(""); setMessage("");
     try {
-      const url = `/api/v1/admin/events/${encodeURIComponent(eventId)}/participants${all || selected ? "" : `/${encodeURIComponent(deleteRow!.participant.participantUid)}`}`;
+      const url = `/api/v1/admin/events/${encodeURIComponent(eventId)}/participants${all || selected || ticket ? "" : `/${encodeURIComponent(deleteRow!.participant.participantUid)}`}`;
       const response = await fetch(url, { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify(all
         ? { confirmEventName: data.event.name, expectedCount: data.rows.length }
         : selected ? { confirmSelection: required, expectedCount: selectedParticipantIds.length, participantIds: selectedParticipantIds }
+        : ticket ? { ticketId: ticket.id, confirmTicketName: required, expectedCount: deleteTicketRows.length }
         : { confirmBib: required }) });
       const payload = await response.json() as { ok?: boolean; data?: { deleted: number; warning?: string }; error?: string };
       if (!response.ok || !payload.ok) throw new Error(payload.error || "Unable to delete participants.");
-      const deletedCount = payload.data?.deleted ?? (all ? data.rows.length : selected ? selectedParticipantIds.length : 1);
-      setDeleteRow(null); setDeleteAllOpen(false); setDeleteSelectedOpen(false); setDeleteConfirmation("");
+      const deletedCount = payload.data?.deleted ?? (all ? data.rows.length : selected ? selectedParticipantIds.length : ticket ? deleteTicketRows.length : 1);
+      setDeleteRow(null); setDeleteAllOpen(false); setDeleteSelectedOpen(false); setDeleteTicketOpen(false); setDeleteTicketId(""); setDeleteConfirmation("");
       if (all || selected) setSelectedParticipantIds([]);
       setMessage(`${deletedCount} uploaded participant${deletedCount === 1 ? "" : "s"} removed from ${data.event.name}. Official results and volunteer history were not deleted.${payload.data?.warning ? ` ${payload.data.warning}` : ""}`);
       await load();
@@ -315,8 +324,17 @@ export function ParticipantManagementAdmin({ events }: { events: RaceEvent[] }) 
     });
   }
 
-  function beginEdit(row: ParticipantRow) {
-    setEditingId(row.participant.participantUid); setChipCode(row.chipCode); setAthleteBandCode(row.athleteBandCode); setMessage(""); setError("");
+  function beginAssignmentEdit(row: ParticipantRow, kind: "chip" | "athlete-band") {
+    const currentValue = kind === "chip" ? row.chipCode : row.athleteBandCode;
+    setAssignmentEdit({
+      kind,
+      participantId: row.participant.participantUid,
+      bib: row.participant.bib || "—",
+      name: row.participant.displayName,
+      value: currentValue,
+      currentValue,
+    });
+    setMessage(""); setError("");
   }
 
   async function openParticipant(row: ParticipantRow) {
@@ -364,28 +382,45 @@ export function ParticipantManagementAdmin({ events }: { events: RaceEvent[] }) 
   }
 
   async function patchAssignment(path: "chip" | "athlete-band", participantId: string, body: Record<string, string>) {
-    const removingBand = path === "athlete-band" && !body.athleteBandCode;
+    const removing = (path === "chip" && !body.chipCode?.trim()) || (path === "athlete-band" && !body.athleteBandCode?.trim());
     const response = await fetch(`/api/v1/admin/events/${encodeURIComponent(eventId)}/participants/${encodeURIComponent(participantId)}/${path}`, {
-      method: removingBand ? "DELETE" : "PATCH",
+      method: removing ? "DELETE" : "PATCH",
       headers: { "content-type": "application/json" },
-      ...(removingBand ? {} : { body: JSON.stringify({ ...body, reason: "Updated from Participants admin" }) }),
+      ...(removing ? {} : { body: JSON.stringify({ ...body, reason: "Updated from Participants admin" }) }),
     });
     const payload = await response.json() as { ok?: boolean; error?: string };
     if (!response.ok || !payload.ok) throw new Error(payload.error || `Unable to update ${path === "chip" ? "chip" : "athlete band"}.`);
   }
 
-  async function saveAssignments(row: ParticipantRow) {
-    const nextChip = chipCode.trim(); const nextBand = athleteBandCode.trim();
-    if (row.chipCode && !nextChip) { setError("Timing chips cannot be cleared here. Enter the current chip code or cancel the edit."); return; }
-    if (!nextChip && !nextBand && !row.athleteBandCode) { setError("Enter a chip code, an athlete band code, or both."); return; }
-    if (nextChip === row.chipCode && nextBand === row.athleteBandCode) { setEditingId(""); return; }
-    setSaving(row.participant.participantUid); setError(""); setMessage("");
+  function applyAssignmentValues(participantId: string, nextChip: string, nextBand: string) {
+    setData((current) => current ? {
+      ...current,
+      rows: current.rows.map((item) => item.participant.participantUid === participantId
+        ? { ...item, chipCode: nextChip, athleteBandCode: nextBand }
+        : item),
+    } : current);
+  }
+
+  async function saveAssignmentEdit() {
+    if (!assignmentEdit) return;
+    const nextValue = assignmentEdit.value.trim().replace(/\s+/g, "").toUpperCase();
+    const currentValue = assignmentEdit.currentValue.trim().replace(/\s+/g, "").toUpperCase();
+    if (nextValue === currentValue) { setAssignmentEdit(null); return; }
+    setSaving(assignmentEdit.participantId); setError(""); setMessage("");
     try {
-      if (nextChip !== row.chipCode) await patchAssignment("chip", row.participant.participantUid, { chipCode: nextChip });
-      if (nextBand !== row.athleteBandCode) await patchAssignment("athlete-band", row.participant.participantUid, { athleteBandCode: nextBand });
-      setMessage(`Saved chip and athlete-band assignments for BIB ${row.participant.bib || "—"}.`);
-      setEditingId(""); await load();
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to save assignments."); }
+      const row = data?.rows.find((item) => item.participant.participantUid === assignmentEdit.participantId);
+      if (!row) throw new Error("Participant is no longer available. Refresh and try again.");
+      if (assignmentEdit.kind === "chip") {
+        await patchAssignment("chip", assignmentEdit.participantId, { chipCode: nextValue });
+        applyAssignmentValues(assignmentEdit.participantId, nextValue, row.athleteBandCode);
+        setMessage(nextValue ? `Timing chip ${nextValue} saved for BIB ${assignmentEdit.bib}.` : `Timing chip removed from BIB ${assignmentEdit.bib}.`);
+      } else {
+        await patchAssignment("athlete-band", assignmentEdit.participantId, { athleteBandCode: nextValue });
+        applyAssignmentValues(assignmentEdit.participantId, row.chipCode, nextValue);
+        setMessage(nextValue ? `Athlete band ${nextValue} saved for BIB ${assignmentEdit.bib}.` : `Athlete band removed from BIB ${assignmentEdit.bib}.`);
+      }
+      setAssignmentEdit(null);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : `Unable to save ${assignmentEdit.kind === "chip" ? "timing chip" : "athlete band"}.`); }
     finally { setSaving(""); }
   }
 
@@ -434,22 +469,23 @@ export function ParticipantManagementAdmin({ events }: { events: RaceEvent[] }) 
       </div></>}
     </div>
     {loading ? <div className="admin-empty participant-loading"><LoaderCircle className="spin" /> Loading participants from Worker/KV…</div> : !data ? <div className="admin-empty" role="alert">Participant roster could not be loaded. No data has been changed. <button className="button" type="button" onClick={() => void load()}>Retry loading participants</button></div> : <>
-      <div className="participant-bulk-actions" aria-live="polite"><label><input type="checkbox" checked={allFilteredSelected} ref={(input) => { if (input) input.indeterminate = someFilteredSelected && !allFilteredSelected; }} onChange={toggleAllFiltered} disabled={!filteredIds.length || mutationBusy} /> Select all {filteredIds.length.toLocaleString()} matching participants</label><span><b>{selectedParticipantIds.length.toLocaleString()}</b> selected</span><button className="button" type="button" disabled={!selectedParticipantIds.length || mutationBusy} onClick={() => setSelectedParticipantIds([])}>Clear selection</button><button className="button participant-danger-button" type="button" disabled={!selectedParticipantIds.length || mutationBusy} onClick={() => { setDeleteConfirmation(""); setError(""); setDeleteSelectedOpen(true); }}><Trash2 /> Delete selected</button></div>
-      <div className="table-wrap participant-table-wrap"><table className="participant-table"><thead><tr><th className="participant-select-column"><input type="checkbox" aria-label={`Select all ${filteredIds.length} matching participants`} checked={allFilteredSelected} ref={(input) => { if (input) input.indeterminate = someFilteredSelected && !allFilteredSelected; }} onChange={toggleAllFiltered} disabled={!filteredIds.length || mutationBusy} /></th><th>BIB NO.</th><th>CHIPCODE</th><th>ATHLETE BAND</th><th>ATHLETE / BUSINESS</th><th>CATEGORY</th><th>STATUS</th><th>CONTACT</th><th>AGE / GENDER</th><th>CLUB</th><th>TYPE</th><th>REGISTERED</th><th>VISIBILITY</th><th>ACTIONS</th></tr></thead><tbody>{visibleRows.map((row) => {
-        const participant = row.participant; const editing = editingId === participant.participantUid; const busy = saving === participant.participantUid;
-        return <tr key={participant.participantUid} className={selectedIdSet.has(participant.participantUid) ? "participant-row-selected" : undefined}><td className="participant-select-column"><input type="checkbox" aria-label={`Select ${participant.displayName}, BIB ${participant.bib || "unassigned"}`} checked={selectedIdSet.has(participant.participantUid)} onChange={() => toggleParticipantSelection(participant.participantUid)} disabled={mutationBusy} /></td><td><button className="participant-open-bib" type="button" onClick={() => void openParticipant(row)}>{participant.bib || "—"}</button>{row.participationMode === "RELAY" ? <small>Relay · {row.relayMemberNumber}/{row.relayTeamSize}</small> : null}</td><td>{editing ? <input aria-label={`Chip code for BIB ${participant.bib || "unassigned"}`} className="participant-code-input" placeholder="Enter chip code" value={chipCode} onChange={(event) => setChipCode(event.target.value)} /> : <button className="participant-inline-code" type="button" onClick={() => beginEdit(row)}><code>{row.chipCode || "—"}</code><Pencil /></button>}</td><td>{editing ? <input aria-label={`Athlete band code for BIB ${participant.bib || "unassigned"}`} className="participant-code-input" placeholder="Enter band code" value={athleteBandCode} onChange={(event) => setAthleteBandCode(event.target.value)} /> : <button className="participant-inline-code participant-band-code" type="button" onClick={() => beginEdit(row)}><code>{row.athleteBandCode || "—"}</code><Pencil /></button>}</td><td><button className="participant-open-name" type="button" onClick={() => void openParticipant(row)}>{participant.displayName}</button><small>{row.participationMode === "RELAY" ? `${row.relayTeamName}${row.relayMemberRole ? ` · ${row.relayMemberRole}` : ""}` : row.source}</small></td><td>{participant.contestName || "—"}</td><td><span className="status-pill">{row.registrationStatus.replaceAll("_", " ")}</span></td><td><span>{row.email || "—"}</span><small>{row.phone}</small></td><td><span>{participant.ageGroup || "—"}</span><small>{participant.gender || "—"}</small></td><td>{participant.club || "—"}</td><td>{row.participationMode === "RELAY" ? `Relay team (${row.relayTeamSize})` : row.registrationType}</td><td>{dateLabel(row.registeredAt)}</td><td><select value={row.override ?? ""} disabled={busy} onChange={(event) => void updateVisibility(row, (event.target.value || null) as AthleteVisibility | null)}>{visibilityOptions.map((option) => <option key={option.value ?? "DEFAULT"} value={option.value ?? ""}>{option.label}</option>)}</select></td><td><div className="participant-row-actions"><button type="button" title="View participant" onClick={() => void openParticipant(row)}><Eye /><span>View</span></button><button className="participant-action-edit" type="button" title="Edit registration" disabled={mutationBusy} onClick={() => openEdit(row)}><Pencil /><span>Edit</span></button><button className="participant-action-delete" type="button" title="Delete participant" disabled={mutationBusy} onClick={() => { setDeleteRow(row); setDeleteConfirmation(""); setError(""); }}><Trash2 /><span>Delete</span></button>{editing ? <><button className="participant-action-save" type="button" title="Save chip and athlete band" disabled={busy} onClick={() => void saveAssignments(row)}>{busy ? <LoaderCircle className="spin" /> : <Save />}<span>{busy ? "Saving…" : "Save"}</span></button><button type="button" title="Cancel editing" disabled={busy} onClick={() => setEditingId("")}><X /><span>Cancel</span></button></> : null}</div></td></tr>;
+      <div className="participant-bulk-actions" aria-live="polite"><label><input type="checkbox" checked={allFilteredSelected} ref={(input) => { if (input) input.indeterminate = someFilteredSelected && !allFilteredSelected; }} onChange={toggleAllFiltered} disabled={!filteredIds.length || mutationBusy} /> Select all {filteredIds.length.toLocaleString()} matching participants</label><span><b>{selectedParticipantIds.length.toLocaleString()}</b> selected</span><button className="button" type="button" disabled={!selectedParticipantIds.length || mutationBusy} onClick={() => setSelectedParticipantIds([])}>Clear selection</button><button className="button participant-danger-button" type="button" disabled={!selectedParticipantIds.length || mutationBusy} onClick={() => { setDeleteConfirmation(""); setError(""); setDeleteSelectedOpen(true); }}><Trash2 /> Delete selected</button><div className="participant-ticket-delete"><select aria-label="Ticket to delete" value={deleteTicketId} onChange={(event) => setDeleteTicketId(event.target.value)}><option value="">Select ticket / contest</option>{eventTickets.map((ticket) => <option key={ticket.id} value={ticket.id}>{ticket.name}</option>)}</select><button className="button participant-danger-button" type="button" disabled={!deleteTicket || !deleteTicketRows.length || mutationBusy} onClick={() => { setDeleteConfirmation(""); setError(""); setDeleteTicketOpen(true); }}><Trash2 /> Delete ticket participants{deleteTicket ? ` (${deleteTicketRows.length})` : ""}</button></div></div>
+      <div className="table-wrap participant-table-wrap" tabIndex={0} aria-label="Participants table. Scroll vertically to see more rows and horizontally to see more columns."><table className="participant-table"><thead><tr><th className="participant-select-column"><input type="checkbox" aria-label={`Select all ${filteredIds.length} matching participants`} checked={allFilteredSelected} ref={(input) => { if (input) input.indeterminate = someFilteredSelected && !allFilteredSelected; }} onChange={toggleAllFiltered} disabled={!filteredIds.length || mutationBusy} /></th><th className="participant-row-number-column">ROW</th><th>BIB NO.</th><th>CHIPCODE</th><th>ATHLETE BAND</th><th>ATHLETE / BUSINESS</th><th>CATEGORY</th><th>STATUS</th><th>CONTACT</th><th>AGE / GENDER</th><th>CLUB</th><th>TYPE</th><th>REGISTERED</th><th>VISIBILITY</th><th>ACTIONS</th></tr></thead><tbody>{visibleRows.map((row, rowIndex) => {
+        const participant = row.participant; const busy = saving === participant.participantUid;
+        return <tr key={participant.participantUid} className={selectedIdSet.has(participant.participantUid) ? "participant-row-selected" : undefined}><td className="participant-select-column"><input type="checkbox" aria-label={`Select ${participant.displayName}, BIB ${participant.bib || "unassigned"}`} checked={selectedIdSet.has(participant.participantUid)} onChange={() => toggleParticipantSelection(participant.participantUid)} disabled={mutationBusy} /></td><td className="participant-row-number-column">{firstVisibleRow + rowIndex + 1}</td><td><button className="participant-open-bib" type="button" onClick={() => void openParticipant(row)}>{participant.bib || "—"}</button>{row.participationMode === "RELAY" ? <small>Relay · {row.relayMemberNumber}/{row.relayTeamSize}</small> : null}</td><td><button className="participant-inline-code participant-chip-code" type="button" title="Edit or remove timing chip" disabled={busy} onClick={() => beginAssignmentEdit(row, "chip")}><code>{row.chipCode || "—"}</code>{busy ? <LoaderCircle className="spin" /> : <Pencil />}</button></td><td><button className="participant-inline-code participant-band-code" type="button" title="Edit or remove athlete band" disabled={busy} onClick={() => beginAssignmentEdit(row, "athlete-band")}><code>{row.athleteBandCode || "—"}</code>{busy ? <LoaderCircle className="spin" /> : <Pencil />}</button></td><td><button className="participant-open-name" type="button" onClick={() => void openParticipant(row)}>{participant.displayName}</button><small>{row.participationMode === "RELAY" ? `${row.relayTeamName}${row.relayMemberRole ? ` · ${row.relayMemberRole}` : ""}` : row.source}</small></td><td>{participant.contestName || "—"}</td><td><span className="status-pill">{row.registrationStatus.replaceAll("_", " ")}</span></td><td><span>{row.email || "—"}</span><small>{row.phone}</small></td><td><span>{participant.ageGroup || "—"}</span><small>{participant.gender || "—"}</small></td><td>{participant.club || "—"}</td><td>{row.participationMode === "RELAY" ? `Relay team (${row.relayTeamSize})` : row.registrationType}</td><td>{dateLabel(row.registeredAt)}</td><td><select value={row.override ?? ""} disabled={busy} onChange={(event) => void updateVisibility(row, (event.target.value || null) as AthleteVisibility | null)}>{visibilityOptions.map((option) => <option key={option.value ?? "DEFAULT"} value={option.value ?? ""}>{option.label}</option>)}</select></td><td><div className="participant-row-actions"><button type="button" title="View participant" onClick={() => void openParticipant(row)}><Eye /><span>View</span></button><button className="participant-action-edit" type="button" title="Edit registration" disabled={mutationBusy} onClick={() => openEdit(row)}><Pencil /><span>Edit</span></button><button className="participant-action-delete" type="button" title="Delete participant" disabled={mutationBusy} onClick={() => { setDeleteRow(row); setDeleteConfirmation(""); setError(""); }}><Trash2 /><span>Delete</span></button></div></td></tr>;
       })}</tbody></table></div>
       {!visibleRows.length && <div className="admin-empty">No participants match the selected event and filters.</div>}
-      <div className="participant-pagination"><span>Showing {visibleRows.length.toLocaleString()} of {filtered.length.toLocaleString()}</span><label>Rows <select value={pageSize} onChange={(event) => { setPageSize(event.target.value === "ALL" ? "ALL" : Number(event.target.value) as PageSize); setPage(1); }}><option value="25">25</option><option value="50">50</option><option value="100">100</option><option value="ALL">Show all</option></select></label><div><button disabled={page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>Previous</button><span>{Math.min(page, totalPages)} / {totalPages}</span><button disabled={page >= totalPages} onClick={() => setPage((value) => Math.min(totalPages, value + 1))}>Next</button></div></div>
+      <div className="participant-pagination"><span>{visibleRows.length ? `Showing ${(firstVisibleRow + 1).toLocaleString()}–${(firstVisibleRow + visibleRows.length).toLocaleString()} of ${filtered.length.toLocaleString()}` : "No matching participants"}</span><span className="participant-page-size">50 rows per page</span><div><button disabled={currentPage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>Previous</button><span>Page {currentPage} of {totalPages}</span><button disabled={currentPage >= totalPages} onClick={() => setPage((value) => Math.min(totalPages, value + 1))}>Next</button></div></div>
     </>}
     {selectedRow && <ParticipantDetailsModal row={selectedRow} detail={participantDetail} loading={detailLoading} error={detailError} resetting={resettingAction} mutationBusy={mutationBusy} onResetWaiver={() => void resetWaiverCheckIn(selectedRow)} onResetBike={() => void resetBikeCheckIn(selectedRow)} onClose={() => { setSelectedRow(null); setParticipantDetail(null); setDetailError(""); }} />}
+    {assignmentEdit && <div className="participant-detail-backdrop" role="presentation" onMouseDown={() => { if (!saving) setAssignmentEdit(null); }}><section className="participant-detail-modal participant-confirm-modal" role="dialog" aria-modal="true" aria-label={assignmentEdit.kind === "chip" ? "Edit timing chip" : "Edit athlete band"} onMouseDown={(event) => event.stopPropagation()}><header><div><h2>{assignmentEdit.kind === "chip" ? "Edit timing chip" : "Edit athlete band"}</h2><p>{assignmentEdit.name} · BIB {assignmentEdit.bib}</p></div><button type="button" disabled={Boolean(saving)} onClick={() => setAssignmentEdit(null)} aria-label="Close assignment editor"><X /></button></header><div className="participant-detail-scroll">{error && <div className="error-banner" role="alert">{error}</div>}<label>{assignmentEdit.kind === "chip" ? "Timing chip code" : "Athlete band code"}<input autoFocus autoComplete="off" maxLength={64} value={assignmentEdit.value} placeholder={assignmentEdit.kind === "chip" ? "Enter timing chip" : "Enter athlete band"} onChange={(event) => setAssignmentEdit((current) => current ? { ...current, value: event.target.value.toUpperCase().replace(/\s+/g, "") } : current)} onKeyDown={(event) => { if (event.key === "Enter") void saveAssignmentEdit(); }} /></label><p>Leave blank and save to remove the {assignmentEdit.kind === "chip" ? "timing chip" : "athlete band"}. Changes are event-scoped and audited.</p><div className="participant-modal-actions"><button className="button" type="button" disabled={Boolean(saving)} onClick={() => setAssignmentEdit(null)}>Cancel</button><button className="button button-primary" type="button" disabled={Boolean(saving)} onClick={() => void saveAssignmentEdit()}>{saving ? <><LoaderCircle className="spin" /> Saving…</> : assignmentEdit.value.trim() ? `Save ${assignmentEdit.kind === "chip" ? "timing chip" : "athlete band"}` : `Remove ${assignmentEdit.kind === "chip" ? "timing chip" : "athlete band"}`}</button></div></div></section></div>}
     {editRow && editDraft && <div className="participant-detail-backdrop" role="presentation"><section className="participant-detail-modal participant-edit-modal" role="dialog" aria-modal="true" aria-label={`Edit ${editRow.participant.displayName}`}><header><h2>Edit participant · BIB {editRow.participant.bib}</h2><button type="button" onClick={() => { setEditRow(null); setEditDraft(null); }} aria-label="Close edit"><X /></button></header><div className="participant-detail-scroll"><p>Update every uploaded registration field, timing chip, and athlete band in one place. Published results remain unchanged. Audited check-in and fulfilment values are shown below as read-only.</p>{error && <div className="error-banner" role="alert">{error}</div>}
       {participantEditSections.map((section) => <section className="participant-edit-section" key={section.title}><h3>{section.title}</h3><div className="participant-edit-grid">{section.fields.map(([field, label, type]) => <label key={field}>{label}<input type={type} value={editDraft[field]} onChange={(event) => setEditDraft({ ...editDraft, [field]: event.target.value })} /></label>)}</div></section>)}
       <section className="participant-edit-section"><h3>Event contest</h3><div className="participant-edit-grid"><label>Event ticket<select value={editDraft.ticketId} onChange={(event) => { const ticket = eventTickets.find((item) => item.id === event.target.value); setEditDraft({ ...editDraft, ticketId: ticket?.id || "", ticketName: ticket?.name || "" }); }}><option value="">Select ticket</option>{eventTickets.map((ticket) => <option key={ticket.id} value={ticket.id}>{ticket.name}</option>)}</select></label><label>Participation mode<input readOnly value={editRow.participationMode === "RELAY" ? `Relay team (${editRow.relayTeamSize || "—"})` : "Individual"} /></label>{editRow.participationMode === "RELAY" && <><label>Relay team<input readOnly value={editRow.relayTeamName} /></label><label>Relay member<input readOnly value={`${editRow.relayMemberNumber || "—"}${editRow.relayMemberRole ? ` · ${editRow.relayMemberRole}` : ""}`} /></label></>}</div></section>
       <section className="participant-edit-section"><h3>Uploaded spreadsheet columns</h3><p>Every column retained from the uploaded row is shown below. Fields already mapped into the form above are synchronized there; other uploaded columns can be edited here.</p>{Object.keys(editDraft.uploadedFields).length ? <div className="participant-edit-grid">{Object.entries(editDraft.uploadedFields).map(([header, value]) => { const managed = structuredUploadedHeaders(editRow).has(header); return <label key={header}>{header}{managed && <small>Managed in the fields above</small>}<input readOnly={managed} value={value} onChange={(event) => setEditDraft({ ...editDraft, uploadedFields: { ...editDraft.uploadedFields, [header]: event.target.value } })} /></label>; })}</div> : <div className="admin-empty participant-uploaded-empty">No original spreadsheet columns were retained for this older upload. Re-upload the source file to preserve every original column.</div>}</section>
       <section className="participant-edit-section participant-edit-readonly"><h3>Check-in &amp; fulfilment · read-only</h3><p>Use the volunteer waiver, bike, medal, food, and checkout workflows to change these audited values.</p><div className="participant-edit-grid">{participantOperationalFields.map(([field, label]) => <label key={field}>{label}<input readOnly value={String(editRow[field] ?? "")} placeholder="—" /></label>)}</div></section>
       <div className="participant-modal-actions"><button className="button" type="button" disabled={mutationBusy} onClick={() => { setEditRow(null); setEditDraft(null); }}>Cancel</button><button className="button button-primary" type="button" disabled={mutationBusy} onClick={() => void saveParticipant()}>{mutationBusy ? "Saving all fields…" : "Save all participant fields"}</button></div></div></section></div>}
-    {(deleteRow || deleteAllOpen || deleteSelectedOpen) && <div className="participant-detail-backdrop" role="presentation"><section className="participant-detail-modal participant-confirm-modal" role="alertdialog" aria-modal="true" aria-label={deleteAllOpen ? "Delete all event participants" : deleteSelectedOpen ? "Delete selected participants" : "Delete participant"}><header><h2>{deleteAllOpen ? "Delete all uploaded participants?" : deleteSelectedOpen ? `Delete ${selectedParticipantIds.length} selected participants?` : "Delete uploaded participant?"}</h2><button type="button" disabled={mutationBusy} onClick={() => { setDeleteRow(null); setDeleteAllOpen(false); setDeleteSelectedOpen(false); setDeleteConfirmation(""); }} aria-label="Cancel deletion"><X /></button></header><div className="participant-detail-scroll"><p className="participant-danger-warning">{deleteAllOpen ? `This removes all ${data?.rows.length ?? 0} uploaded registrations from ${data?.event.name ?? "this event"}, not just the currently filtered rows.` : deleteSelectedOpen ? `This removes exactly ${selectedParticipantIds.length} selected uploaded registrations from ${data?.event.name ?? "this event"}.` : `This removes ${deleteRow?.participant.displayName ?? "this athlete"} (BIB ${deleteRow?.participant.bib ?? "—"}) from the uploaded roster.`} This cannot be undone here. Official results, timing records, and volunteer history are not deleted. Previously reserved chip or band codes may need separate admin review before reuse.</p>{error && <div className="error-banner" role="alert">{error}</div>}<label>Type <strong>{deleteAllOpen ? data?.event.name : deleteSelectedOpen ? "DELETE" : deleteRow?.participant.bib}</strong> to confirm<input autoFocus value={deleteConfirmation} onChange={(event) => setDeleteConfirmation(event.target.value)} /></label><div className="participant-modal-actions"><button className="button" type="button" disabled={mutationBusy} onClick={() => { setDeleteRow(null); setDeleteAllOpen(false); setDeleteSelectedOpen(false); setDeleteConfirmation(""); }}>Cancel</button><button className="button participant-danger-button" type="button" disabled={mutationBusy || deleteConfirmation !== (deleteAllOpen ? data?.event.name : deleteSelectedOpen ? "DELETE" : deleteRow?.participant.bib)} onClick={() => void confirmDelete()}>{mutationBusy ? "Deleting…" : deleteAllOpen ? "Delete all participants" : deleteSelectedOpen ? `Delete ${selectedParticipantIds.length} selected` : "Delete participant"}</button></div></div></section></div>}
+    {(deleteRow || deleteAllOpen || deleteSelectedOpen || deleteTicketOpen) && <div className="participant-detail-backdrop" role="presentation"><section className="participant-detail-modal participant-confirm-modal" role="alertdialog" aria-modal="true" aria-label={deleteAllOpen ? "Delete all event participants" : deleteSelectedOpen ? "Delete selected participants" : deleteTicketOpen ? "Delete ticket participants" : "Delete participant"}><header><h2>{deleteAllOpen ? "Delete all uploaded participants?" : deleteSelectedOpen ? `Delete ${selectedParticipantIds.length} selected participants?` : deleteTicketOpen ? `Delete ${deleteTicketRows.length} ${deleteTicket?.name || "ticket"} participants?` : "Delete uploaded participant?"}</h2><button type="button" disabled={mutationBusy} onClick={() => { setDeleteRow(null); setDeleteAllOpen(false); setDeleteSelectedOpen(false); setDeleteTicketOpen(false); setDeleteConfirmation(""); }} aria-label="Cancel deletion"><X /></button></header><div className="participant-detail-scroll"><p className="participant-danger-warning">{deleteAllOpen ? `This removes all ${data?.rows.length ?? 0} uploaded registrations from ${data?.event.name ?? "this event"}, not just the currently filtered rows.` : deleteSelectedOpen ? `This removes exactly ${selectedParticipantIds.length} selected uploaded registrations from ${data?.event.name ?? "this event"}.` : deleteTicketOpen ? `This removes all ${deleteTicketRows.length} uploaded registrations assigned to ${deleteTicket?.name || "the selected ticket"}. Relay tickets include every relay member row.` : `This removes ${deleteRow?.participant.displayName ?? "this athlete"} (BIB ${deleteRow?.participant.bib ?? "—"}) from the uploaded roster.`} This cannot be undone here. Official results, timing records, and volunteer history are not deleted. Previously reserved chip or band codes may need separate admin review before reuse.</p>{error && <div className="error-banner" role="alert">{error}</div>}<label>Type <strong>{deleteAllOpen ? data?.event.name : deleteSelectedOpen ? "DELETE" : deleteTicketOpen ? deleteTicket?.name : deleteRow?.participant.bib}</strong> to confirm<input autoFocus value={deleteConfirmation} onChange={(event) => setDeleteConfirmation(event.target.value)} /></label><div className="participant-modal-actions"><button className="button" type="button" disabled={mutationBusy} onClick={() => { setDeleteRow(null); setDeleteAllOpen(false); setDeleteSelectedOpen(false); setDeleteTicketOpen(false); setDeleteConfirmation(""); }}>Cancel</button><button className="button participant-danger-button" type="button" disabled={mutationBusy || deleteConfirmation !== (deleteAllOpen ? data?.event.name : deleteSelectedOpen ? "DELETE" : deleteTicketOpen ? deleteTicket?.name : deleteRow?.participant.bib)} onClick={() => void confirmDelete()}>{mutationBusy ? "Deleting…" : deleteAllOpen ? "Delete all participants" : deleteSelectedOpen ? `Delete ${selectedParticipantIds.length} selected` : deleteTicketOpen ? `Delete ${deleteTicketRows.length} ticket participants` : "Delete participant"}</button></div></div></section></div>}
   </section>;
 }
 
@@ -524,6 +560,7 @@ function ParticipantDetailsModal({ row, detail, loading, error, resetting, mutat
             <DetailRow icon={IdCard} label="Identity Proof" value={registration?.idProofUrl ? "Open Document" : "Not provided"} link={registration?.idProofUrl} />
             <DetailRow icon={Pencil} label="Signature" value={registration?.signatureName} />
             <DetailRow icon={FileText} label="Waiver Document" value={registration?.waiverDocumentUrl ? "Read Signed Waiver" : "Not available"} link={registration?.waiverDocumentUrl} />
+            {registration?.waiverDocumentAvailable && <div className="participant-modal-actions"><a className="button button-primary" href={`/api/v1/admin/events/${encodeURIComponent(detail.event.id)}/participants/${encodeURIComponent(participant.participantUid)}/waiver`}><Download /> Download signed waiver PDF</a></div>}
             <DetailRow icon={ShieldCheck} label="Rules Accepted" value={<BooleanValue value={registration?.rulesAccepted ?? null} />} />
             <DetailRow icon={ShieldCheck} label="Cut-off Accepted" value={<BooleanValue value={registration?.cutoffAccepted ?? null} />} />
             <DetailRow icon={ShieldCheck} label="Cancellation / Deferral Policy" value={<BooleanValue value={registration?.cancellationPolicyAccepted ?? null} />} />

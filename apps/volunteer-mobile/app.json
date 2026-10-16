@@ -6,7 +6,6 @@
     "icon": "./RACE UPSHOT VOLUYNTEER APP LOGO.png",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
-    "newArchEnabled": true,
     "ios": {
       "icon": "./RACE UPSHOT VOLUYNTEER APP LOGO.png",
       "supportsTablet": true,

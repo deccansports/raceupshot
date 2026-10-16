@@ -12,6 +12,11 @@ const testCommunicationInput = z.object({
   contentType: z.enum(["TEXT", "HTML"]).default("TEXT"),
   eventId: z.string().trim().max(160).optional(),
   variables: z.record(z.string().max(80), z.string().max(10_000)).default({}),
+  attachment: z.object({
+    filename: z.string().trim().min(1).max(180),
+    contentType: z.enum(["image/jpeg", "image/png", "image/webp", "application/pdf"]),
+    data: z.string().min(1).max(14_000_000),
+  }).optional(),
 });
 
 export async function POST(request: Request) {
@@ -46,6 +51,7 @@ export async function POST(request: Request) {
         } : {}),
         ...input.data.variables,
       }),
+      ...(input.data.attachment ? { attachments: [input.data.attachment] } : {}),
     });
     if (!delivery.sent) return apiFailure(delivery.error || "The test email could not be sent.", 502);
     return apiSuccess({

@@ -26,19 +26,19 @@ describe("multiple registrations, consolidated waiver and event-specific check-i
   });
 
   it("TEST 4 checking in the morning registration does not change evening check-in", () => {
-    const signed = { ...unsignedState, waiverVerifiedAt: "2026-10-12T03:00:00.000Z" };
+    const signed = { ...unsignedState, waiverVerifiedAt: "2026-10-12T03:00:00.000Z", emailOtpVerifiedAt: "2026-10-12T03:00:00.000Z" };
     const checkedMorning = completeRegistrationCheckIn(signed, { waiverRequired: true, capturedAt: "2026-10-12T03:10:00.000Z", volunteerName: "Volunteer" });
     expect(checkedMorning.checkedInAt).toBeTruthy();
     expect(signed.checkedInAt).toBeNull();
   });
 
   it("TEST 5 evening keeps waiver signed and check-in pending", () => {
-    const eveningState = { ...unsignedState, waiverVerifiedAt: "2026-10-12T03:00:00.000Z" };
+    const eveningState = { ...unsignedState, waiverVerifiedAt: "2026-10-12T03:00:00.000Z", emailOtpVerifiedAt: "2026-10-12T03:00:00.000Z" };
     expect(eveningState).toMatchObject({ waiverVerifiedAt: expect.any(String), checkedInAt: null });
   });
 
   it("TEST 6 evening check-in uses the existing covered waiver without another signature", () => {
-    const state = { ...unsignedState, waiverVerifiedAt: "2026-10-12T03:00:00.000Z" };
+    const state = { ...unsignedState, waiverVerifiedAt: "2026-10-12T03:00:00.000Z", emailOtpVerifiedAt: "2026-10-12T03:00:00.000Z" };
     expect(completeRegistrationCheckIn(state, { waiverRequired: true, capturedAt: "2026-10-12T12:00:00.000Z", volunteerName: "Volunteer" }).checkedInAt).toBe("2026-10-12T12:00:00.000Z");
   });
 
@@ -60,7 +60,7 @@ describe("multiple registrations, consolidated waiver and event-specific check-i
   });
 
   it("TEST 10 a serialized duplicate check-in records only the first operation", () => {
-    const signed = { ...unsignedState, waiverVerifiedAt: "2026-10-12T03:00:00.000Z" };
+    const signed = { ...unsignedState, waiverVerifiedAt: "2026-10-12T03:00:00.000Z", emailOtpVerifiedAt: "2026-10-12T03:00:00.000Z" };
     const first = completeRegistrationCheckIn(signed, { waiverRequired: true, capturedAt: "2026-10-12T03:10:00.000Z", volunteerName: "V1" });
     expect(() => completeRegistrationCheckIn(first, { waiverRequired: true, capturedAt: "2026-10-12T03:10:00.001Z", volunteerName: "V2" })).toThrow("already checked in");
   });

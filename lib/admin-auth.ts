@@ -64,6 +64,10 @@ export async function createAdminSession(email: string) {
   });
 }
 
+export async function clearAdminSession() {
+  (await cookies()).delete(COOKIE_NAME);
+}
+
 export async function getAuthenticatedAdminEmail(): Promise<string | null> {
   const config = await getAdminConfig();
   if (!config.email || !config.secret) return null;

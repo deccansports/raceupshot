@@ -22,6 +22,7 @@ const moduleCopy: Record<VolunteerModule, { label: string; icon: string; detail:
   BIKE_CHECK_OUT: { label: 'Bike Check-Out', icon: '↗', detail: 'Release only a currently checked-in bike.' },
   MEDAL_COUNTER: { label: 'Finisher Medal / Goodies', icon: '★', detail: 'Record one medal / goodies bundle per athlete.' },
   FOOD_COUNTER: { label: 'Food Counter', icon: '◉', detail: 'Record one food issuance per athlete.' },
+  PAID_FOOD_COUNTER: { label: 'Paid Food Redemption', icon: '₹', detail: 'Find purchased food by coupon, order, mobile or email and redeem it once.' },
   LOCKER_COUNTER: { label: 'Locker Counter', icon: '▦', detail: 'Assign or update athlete locker number.' },
   COUNTER: { label: 'Counter', icon: '#', detail: 'Scan and identify athletes at your assigned counter station.' },
   FINISH_LINE_VOLUNTEER: { label: 'Finish Line Volunteer', icon: '⚑', detail: 'Monitor athletes racing, course-leg counts and official finish logs.' },
@@ -33,9 +34,11 @@ const moduleCopy: Record<VolunteerModule, { label: string; icon: string; detail:
 };
 
 type ActionName = 'CHECK_IN' | 'BIKE_IN' | 'BIKE_OUT' | 'MEDAL_ISSUE' | 'FOOD_ISSUE' | 'LOCKER_ASSIGN';
-type WaiverSearchMode = 'BIB Number' | 'Registration ID' | 'Athlete Band' | 'Name' | 'Email' | 'Mobile';
+type WaiverSearchMode = 'BIB Number' | 'Registration ID' | 'Athlete Band' | 'Name / Email' | 'Mobile';
 type ChipSearchMode = 'BIB Number' | 'Athlete Band';
 type OperationsLogKey = 'check-in' | 'bike-in' | 'bike-out' | 'chip';
+
+type PaidFoodCoupon = { code: string; orderId: string; buyerName: string; buyerEmail: string; buyerMobile: string; itemName: string; amountPaisa: number; status: 'ISSUED' | 'REDEEMED'; redeemedAt: string | null; redeemedByName: string | null };
 
 function formatted(value: string | null): string {
   if (!value) return 'Not recorded';
@@ -144,6 +147,40 @@ function Scanner({ title, onScanned, onClose }: { title: string; onScanned: (val
   </View>;
 }
 
+function PaidFoodScreen({ eventId }: { eventId: string }) {
+  const [query, setQuery] = useState('');
+  const [coupons, setCoupons] = useState<PaidFoodCoupon[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [redeeming, setRedeeming] = useState('');
+  const [feedback, setFeedback] = useState<{ ok: boolean; message: string } | null>(null);
+
+  async function search() {
+    if (!query.trim()) { setFeedback({ ok: false, message: 'Enter a coupon code, order ID, mobile number or email.' }); return; }
+    setLoading(true); setFeedback(null);
+    try {
+      const result = await apiRequest<{ coupons: PaidFoodCoupon[] }>(`/api/mobile/volunteer/paid-food?eventId=${encodeURIComponent(eventId)}&query=${encodeURIComponent(query.trim())}`);
+      setCoupons(result.coupons); if (!result.coupons.length) setFeedback({ ok: false, message: 'No paid-food order matched this event and search.' });
+    } catch (caught) { setFeedback({ ok: false, message: caught instanceof Error ? caught.message : 'Paid-food search failed.' }); }
+    finally { setLoading(false); }
+  }
+
+  async function redeem(coupon: PaidFoodCoupon) {
+    setRedeeming(coupon.code); setFeedback(null);
+    try {
+      const updated = await apiRequest<PaidFoodCoupon>('/api/mobile/volunteer/paid-food', { method: 'POST', body: JSON.stringify({ eventId, code: coupon.code }) });
+      setCoupons((current) => current.map((row) => row.code === updated.code ? updated : row));
+      setFeedback({ ok: true, message: `${updated.itemName} redeemed for ${updated.buyerName}.` });
+    } catch (caught) { setFeedback({ ok: false, message: caught instanceof Error ? caught.message : 'Coupon redemption failed.' }); }
+    finally { setRedeeming(''); }
+  }
+
+  return <View>
+    <View style={styles.searchRow}><TextInput value={query} onChangeText={setQuery} onSubmitEditing={() => void search()} autoCapitalize="characters" placeholder="Coupon, order, mobile or email" placeholderTextColor="#7c898f" style={styles.searchInput} /><Pressable disabled={loading} onPress={() => void search()} style={[styles.searchButton, loading && styles.disabled]}>{loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.searchButtonText}>FIND</Text>}</Pressable></View>
+    {feedback ? <Text style={feedback.ok ? styles.success : styles.errorText}>{feedback.message}</Text> : null}
+    {coupons.map((coupon) => <View key={coupon.code} style={styles.athleteCard}><View style={styles.athleteTop}><View style={styles.bibBox}><Text style={styles.bibLabel}>COUPON</Text><Text style={styles.bibValue}>{coupon.code}</Text></View><View style={styles.athleteIdentity}><Text style={styles.athleteName}>{coupon.buyerName}</Text><Text style={styles.athleteMeta}>Order {coupon.orderId}{coupon.buyerMobile ? ` · ${coupon.buyerMobile}` : coupon.buyerEmail ? ` · ${coupon.buyerEmail}` : ''}</Text></View><Text style={[styles.status, coupon.status === 'REDEEMED' && styles.statusDone]}>{coupon.status}</Text></View><View style={styles.facts}><Text style={styles.fact}>Item: {coupon.itemName}</Text><Text style={styles.fact}>Paid: ₹{(coupon.amountPaisa / 100).toFixed(2)}</Text>{coupon.redeemedAt ? <Text style={[styles.fact, styles.factConfirmed]}>Redeemed {formatted(coupon.redeemedAt)}{coupon.redeemedByName ? ` · ${coupon.redeemedByName}` : ''}</Text> : null}</View><Pressable disabled={coupon.status === 'REDEEMED' || redeeming === coupon.code} onPress={() => Alert.alert('Redeem paid food?', `${coupon.itemName} · ${coupon.buyerName} · coupon ${coupon.code}`, [{ text: 'Cancel', style: 'cancel' }, { text: 'Redeem', onPress: () => void redeem(coupon) }])} style={[styles.actionButton, coupon.status === 'REDEEMED' && styles.doneButton, (coupon.status === 'REDEEMED' || redeeming === coupon.code) && styles.disabled]}>{redeeming === coupon.code ? <ActivityIndicator color="#fff" /> : <Text style={styles.actionButtonText}>{coupon.status === 'REDEEMED' ? 'ALREADY REDEEMED' : 'REDEEM PURCHASED ITEM'}</Text>}</Pressable></View>)}
+  </View>;
+}
+
 export function DashboardScreen({ session, onRefreshSession, onOpenAthleteProfile, onLogout }: { session: VolunteerSession; onRefreshSession: () => Promise<void>; onOpenAthleteProfile?: () => Promise<void>; onLogout: () => Promise<void> }) {
   const searchInputRef = useRef<TextInput>(null);
   const [assignmentId, setAssignmentId] = useState(session.assignments[0]?.id || '');
@@ -187,6 +224,7 @@ export function DashboardScreen({ session, onRefreshSession, onOpenAthleteProfil
   const [chipOwner, setChipOwner] = useState<Participant | null>(null);
   const [chipOwnerLoading, setChipOwnerLoading] = useState(false);
   const [deviceNow, setDeviceNow] = useState(() => new Date());
+  const [customCounterId, setCustomCounterId] = useState(assignment?.customCounters?.[0]?.id || '');
   const deviceTimeZone = useMemo(() => Intl.DateTimeFormat().resolvedOptions().timeZone || 'Device local time', []);
 
   async function openAthleteProfile() {
@@ -276,6 +314,36 @@ export function DashboardScreen({ session, onRefreshSession, onOpenAthleteProfil
   if (!assignment) return <View style={styles.center}><Text style={styles.errorText}>No active event assignment.</Text></View>;
   const selectedTimingPointId = assignment.timingPointIds.includes(timingPointId) ? timingPointId : assignment.timingPointIds[0] || '';
   const searchedRelayTeam = searchData?.participants.find((participant) => participant.relayTeam)?.relayTeam;
+  const displayedSearchParticipants = (() => {
+    const participants = searchData?.participants || [];
+    if ((module === 'WAIVER_CHECK_IN' || module === 'ATHLETE_CHECK_IN') && searchedRelayTeam) return participants.filter((participant) => participant.participationMode !== 'RELAY');
+    if (module !== 'BIKE_CHECK_IN' && module !== 'BIKE_CHECK_OUT') return participants;
+    const seenRelayTeams = new Set<string>();
+    return participants.filter((participant) => {
+      if (participant.participationMode !== 'RELAY') return true;
+      const teamKey = participant.relayTeamId || `bib:${participant.bib}`;
+      const normalizedRole = (participant.relayMemberRole || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, ' ');
+      if (['cycling', 'cyclist', 'cycle', 'bike', 'biking'].includes(normalizedRole)) return true;
+      const hasCyclist = participants.some((member) => (member.relayTeamId || `bib:${member.bib}`) === teamKey && ['cycling', 'cyclist', 'cycle', 'bike', 'biking'].includes((member.relayMemberRole || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, ' ')));
+      if (hasCyclist || seenRelayTeams.has(teamKey)) return false;
+      seenRelayTeams.add(teamKey);
+      return true;
+    });
+  })();
+  const displayedChipParticipants = (() => {
+    const participants = searchData?.participants || [];
+    const selected: Participant[] = [];
+    const relayGroups = new Map<string, Participant[]>();
+    for (const participant of participants) {
+      if (participant.participationMode !== 'RELAY') selected.push(participant);
+      else {
+        const key = participant.relayTeamId || `bib:${participant.bib}`;
+        relayGroups.set(key, [...(relayGroups.get(key) || []), participant]);
+      }
+    }
+    for (const members of relayGroups.values()) selected.push(members.find((member) => Boolean(member.chipCode)) || members.sort((left, right) => (left.relayMemberNumber ?? 99) - (right.relayMemberNumber ?? 99))[0]);
+    return selected;
+  })();
 
   async function refreshOperationsOverview(eventId = assignment.eventId, silent = false) {
     if (!showsOperationsOverview) return;
@@ -295,6 +363,7 @@ export function DashboardScreen({ session, onRefreshSession, onOpenAthleteProfil
     setModule(next.modules[0] || 'ATHLETE_LOOKUP');
     setRoleMenuOpen(false);
     setTimingPointId(next.timingPointIds[0] || '');
+    setCustomCounterId(next.customCounters?.[0]?.id || '');
     setQuery(''); setSearchData(null); setMessage(null); setError(null); setWaiverOtpParticipantId(null); setWaiverOtp(''); setSelectedRegistrationIds([]); setSignerName(''); setSignerRelationship(''); setBikeRack(''); setOperationsOverview(null); setExpandedLog(null);
   }
 
@@ -312,7 +381,10 @@ export function DashboardScreen({ session, onRefreshSession, onOpenAthleteProfil
     setSearching(true); setError(null); setMessage(null); setBikeRack('');
     try {
       const bikeRackQuery = module === 'BIKE_CHECK_IN' || module === 'BIKE_CHECK_OUT' ? '&rack=1' : '';
-      const data = await apiRequest<ParticipantSearch>(`/api/mobile/volunteer/participants?eventId=${encodeURIComponent(assignment.eventId)}&query=${encodeURIComponent(normalized)}${bikeRackQuery}`);
+      const waiverSearchModeQuery = module === 'WAIVER_CHECK_IN' || module === 'ATHLETE_CHECK_IN'
+        ? `&mode=${encodeURIComponent({ 'BIB Number': 'BIB', 'Registration ID': 'REGISTRATION_ID', 'Athlete Band': 'ATHLETE_BAND', 'Name / Email': 'NAME_EMAIL', Mobile: 'MOBILE' }[waiverSearchMode])}`
+        : '';
+      const data = await apiRequest<ParticipantSearch>(`/api/mobile/volunteer/participants?eventId=${encodeURIComponent(assignment.eventId)}&query=${encodeURIComponent(normalized)}${waiverSearchModeQuery}${bikeRackQuery}`);
       setSearchData(data);
       const firstProfile = data.participantProfiles?.[0];
       const eligible = (firstProfile?.registrations || data.participants.slice(0, 1)).filter((registration) => !registration.state.waiverVerifiedAt);
@@ -351,12 +423,17 @@ export function DashboardScreen({ session, onRefreshSession, onOpenAthleteProfil
       const updated = await apiRequest<Participant>('/api/mobile/volunteer/equipment-assignment', {
         method: 'POST', body: JSON.stringify({ eventId: assignment.eventId, participantId: participant.id, kind, code: assignmentCode }),
       });
-      replaceParticipant(updated); setAssignmentCode(''); setChipOwner(null); setChipOwnerLoading(false);
+      if (kind === 'chip' && participant.participationMode === 'RELAY') {
+        const refreshed = await apiRequest<ParticipantSearch>(`/api/mobile/volunteer/participants?eventId=${encodeURIComponent(assignment.eventId)}&query=${encodeURIComponent(participant.bib)}`);
+        setSearchData(refreshed);
+      } else replaceParticipant(updated);
+      setAssignmentCode(''); setChipOwner(null); setChipOwnerLoading(false);
       if (module === 'WAIVER_CHECK_IN' || module === 'ATHLETE_CHECK_IN') {
         setBandAssignmentOpen(false);
         setBandAssignmentParticipant(null);
       }
-      setMessage(`${participant.name}: ${kind === 'chip' ? 'timing chip' : 'athlete band'} ${kind === 'chip' ? updated.chipCode : updated.athleteBandCode} assigned.`);
+      const assignmentSubject = kind === 'chip' && participant.participationMode === 'RELAY' ? participant.relayTeamName || `Relay Team ${participant.bib}` : participant.name;
+      setMessage(`${assignmentSubject}: ${kind === 'chip' ? 'team timing chip' : 'athlete band'} ${kind === 'chip' ? updated.chipCode : updated.athleteBandCode} assigned.`);
       void refreshOperationsOverview(assignment.eventId, true);
     } catch (caught) { setError(caught instanceof Error ? caught.message : 'The assignment could not be saved.'); }
     finally { setBusyId(null); }
@@ -400,6 +477,18 @@ export function DashboardScreen({ session, onRefreshSession, onOpenAthleteProfil
       if (action === 'LOCKER_ASSIGN') setLockerNumber('');
       void refreshOperationsOverview(assignment.eventId, true);
     } catch (caught) { setError(caught instanceof Error ? caught.message : 'The action could not be recorded.'); }
+    finally { setBusyId(null); }
+  }
+
+  async function runCustomCounterAction(participant: Participant) {
+    const counter = assignment.customCounters?.find((row) => row.id === customCounterId) || assignment.customCounters?.[0];
+    if (!counter) { setError('No custom counter is assigned.'); return; }
+    setBusyId(participant.id); setError(null); setMessage(null);
+    try {
+      await apiRequest('/api/mobile/volunteer/custom-counters', { method: 'POST', body: JSON.stringify({ eventId: assignment.eventId, counterId: counter.id, participantId: participant.id }) });
+      setMessage(`${participant.name}: ${counter.itemName} recorded at ${counter.name}.`);
+      setSearchData(null); setQuery('');
+    } catch (caught) { setError(caught instanceof Error ? caught.message : 'The custom counter action could not be recorded.'); }
     finally { setBusyId(null); }
   }
 
@@ -456,23 +545,29 @@ export function DashboardScreen({ session, onRefreshSession, onOpenAthleteProfil
   }
 
   function confirmBikeEntry(participant: Participant) {
+    const subject = participant.participationMode === 'RELAY'
+      ? `${participant.relayTeamName || 'Relay team'} · Team BIB ${participant.bib || '—'}\nCycling member: ${participant.name}`
+      : `${participant.name} · BIB ${participant.bib || '—'}`;
     if (participant.state.bikeCheckedInAt) {
-      Alert.alert('Bike check-in already completed', `${participant.name} · BIB ${participant.bib || '—'} already has a bike check-in record. Only an administrator can reset it.`);
+      Alert.alert('Bike check-in already completed', `${subject} already has a bike check-in record. Only an administrator can reset it.`);
       return;
     }
-    Alert.alert('Check bike in?', `${participant.name} · BIB ${participant.bib || '—'}\nRack: ${participant.assignedBikeRack || bikeRack.trim() || 'Not assigned'}`, [
+    Alert.alert('Check bike in?', `${subject}\nRack: ${participant.assignedBikeRack || bikeRack.trim() || 'Not assigned'}`, [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Confirm', onPress: () => void runAction(participant, 'BIKE_IN') },
     ]);
   }
 
   function confirmBikeCheckout(participant: Participant) {
+    const subject = participant.participationMode === 'RELAY'
+      ? `${participant.relayTeamName || 'Relay team'} · Team BIB ${participant.bib || '—'}\nCycling member: ${participant.name}`
+      : `${participant.name} · BIB ${participant.bib || '—'}`;
     if (!participant.state.bikeCheckedInAt) {
-      Alert.alert('Bike entry required', `${participant.name} · BIB ${participant.bib || '—'} has no bike check-in recorded for this event. Record or reconcile bike entry before checkout.`);
+      Alert.alert('Bike entry required', `${subject} has no bike check-in recorded for this event. Record or reconcile bike entry before checkout.`);
       return;
     }
     if (participant.state.bikeCheckedOutAt) {
-      Alert.alert('Bike already checked out', `${participant.name} · BIB ${participant.bib || '—'} has already collected the bike.`);
+      Alert.alert('Bike already checked out', `${subject} has already collected the bike.`);
       return;
     }
     confirmAction(participant, 'BIKE_OUT', 'Release checked-in bike?');
@@ -563,16 +658,21 @@ export function DashboardScreen({ session, onRefreshSession, onOpenAthleteProfil
     finally { if (!silent) setRecentTimingLoading(false); }
   }
 
-  async function stampManualTiming() {
+  async function stampManualTiming(replaceExisting = false) {
     const bib = query.trim();
     if (!bib) { setError('Enter a BIB number.'); return; }
     if (assignment.timingScope !== 'AUTO' && !selectedTimingPointId) { setError('Choose an assigned timing point.'); return; }
+    const duplicate = recentTiming.find((row) => row.bib.toUpperCase() === bib.toUpperCase() && (!selectedTimingPointId || row.timingPointName === assignment.timingPointNames[assignment.timingPointIds.indexOf(selectedTimingPointId)]));
+    if (duplicate && !replaceExisting) {
+      Alert.alert('Replace existing stamp?', `BIB ${bib} already has an active stamp at ${duplicate.timingPointName || 'this timing point'}. The original will remain in the audit log as reset.`, [{ text: 'Cancel', style: 'cancel' }, { text: 'Replace', style: 'destructive', onPress: () => void stampManualTiming(true) }]);
+      return;
+    }
     const deviceCapturedAt = new Date().toISOString();
     setBusyId('manual-timing'); setError(null); setMessage(null);
     try {
       const result = await apiRequest<{ id: string; participant: Participant; timingPointName: string; capturedAt: string; timingMode: 'GUN' | 'TIMING_POINT'; gunTime: string | null }>('/api/mobile/volunteer/manual-timing', {
         method: 'POST',
-        body: JSON.stringify({ eventId: assignment.eventId, participantId: bib, ...(selectedTimingPointId ? { timingPointId: selectedTimingPointId } : {}), capturedAt: deviceCapturedAt }),
+        body: JSON.stringify({ eventId: assignment.eventId, participantId: bib, ...(selectedTimingPointId ? { timingPointId: selectedTimingPointId } : {}), capturedAt: deviceCapturedAt, deviceTimeZone, replaceExisting }),
       });
       setQuery('');
       const confirmedStamp: ManualTimingStamp = {
@@ -629,7 +729,7 @@ export function DashboardScreen({ session, onRefreshSession, onOpenAthleteProfil
     if (!showsOperationsOverview) return null;
     const overview = operationsOverview;
     const stats = module === 'TIMING_CHIP_ASSIGNMENT_COUNTER'
-      ? [['TOTAL PARTICIPANTS', overview?.totalAthletes], ['BIKE-IN RECORDED', overview?.bikesEverCheckedIn], ['CHIPS ASSIGNED TO BIKE-INS', overview?.chipsAssignedToBikeEntries], ['BIKE-INS NEEDING CHIP', overview?.remainingToAssignFromBikeEntries]] as const
+      ? [['CHIP ASSIGNMENT TARGETS', overview?.chipAssignmentTargets], ['BIKE-IN RECORDED', overview?.bikesEverCheckedIn], ['CHIPS ASSIGNED TO BIKE-INS', overview?.chipsAssignedToBikeEntries], ['BIKE-INS NEEDING CHIP', overview?.remainingToAssignFromBikeEntries]] as const
       : module === 'BIKE_CHECK_IN'
         ? [['TOTAL PARTICIPANTS', overview?.totalAthletes], ['WAIVER COMPLETED', overview?.waiverCompletedAthletes], ['BIKES CHECKED IN', overview?.bikesEverCheckedIn], ['WAIVERED BIKES REMAINING', overview?.remainingToBikeCheckIn]] as const
         : module === 'BIKE_CHECK_OUT'
@@ -676,6 +776,7 @@ export function DashboardScreen({ session, onRefreshSession, onOpenAthleteProfil
     if (module === 'MEDAL_COUNTER') return <Pressable disabled={pending || Boolean(participant.state.medalIssuedAt)} style={[styles.actionButton, participant.state.medalIssuedAt && styles.doneButton, participant.state.medalIssuedAt && styles.disabled]} onPress={() => confirmAction(participant, 'MEDAL_ISSUE', 'Issue finisher medal / goodies?')}><Text style={styles.actionButtonText}>{participant.state.medalIssuedAt ? 'Medal / goodies issued' : 'Issue medal / goodies'}</Text></Pressable>;
     if (module === 'FOOD_COUNTER') return <Pressable disabled={pending || Boolean(participant.state.foodIssuedAt)} style={[styles.actionButton, participant.state.foodIssuedAt && styles.doneButton]} onPress={() => confirmAction(participant, 'FOOD_ISSUE', 'Issue food?')}><Text style={styles.actionButtonText}>{participant.state.foodIssuedAt ? 'Food issued' : 'Issue food'}</Text></Pressable>;
     if (module === 'LOCKER_COUNTER') return <><TextInput value={lockerNumber} onChangeText={setLockerNumber} placeholder="Locker number" placeholderTextColor="#7c898f" style={styles.smallInput} /><Pressable disabled={pending || !lockerNumber.trim()} style={[styles.actionButton, !lockerNumber.trim() && styles.disabled]} onPress={() => confirmAction(participant, 'LOCKER_ASSIGN', 'Assign locker?')}><Text style={styles.actionButtonText}>Assign locker</Text></Pressable></>;
+    if (module === 'COUNTER' && assignment.customCounters?.length) { const counter = assignment.customCounters.find((row) => row.id === customCounterId) || assignment.customCounters[0]; return <Pressable disabled={pending} style={[styles.actionButton, pending && styles.disabled]} onPress={() => Alert.alert(counter.name, `${counter.actionLabel} ${counter.itemName} to ${participant.name} · BIB ${participant.bib || '—'}?`, [{ text: 'Cancel', style: 'cancel' }, { text: 'Confirm', onPress: () => void runCustomCounterAction(participant) }])}><Text style={styles.actionButtonText}>{counter.actionLabel.toUpperCase()} {counter.itemName.toUpperCase()}</Text></Pressable>; }
     if (module === 'TIMING_CHIP_ASSIGNMENT_COUNTER' || module === 'ATHLETE_BAND_ASSIGNMENT_COUNTER') return <Pressable disabled={pending || !assignmentCode.trim()} style={[styles.actionButton, !assignmentCode.trim() && styles.disabled]} onPress={() => void assignEquipment(participant)}><Text style={styles.actionButtonText}>ASSIGN {module === 'TIMING_CHIP_ASSIGNMENT_COUNTER' ? 'TIMING CHIP' : 'ATHLETE BAND'}</Text></Pressable>;
     return null;
   }
@@ -694,18 +795,21 @@ export function DashboardScreen({ session, onRefreshSession, onOpenAthleteProfil
       <RoleErrorBoundary key={`${assignment.id}:${module}`}><View style={styles.workspace}>
         <Text style={[styles.workspaceTitle, module === 'TIMING_CHIP_ASSIGNMENT_COUNTER' && styles.chipWorkspaceTitle]}>{moduleCopy[module].label}</Text><Text style={[styles.workspaceCopy, module === 'TIMING_CHIP_ASSIGNMENT_COUNTER' && styles.chipWorkspaceCopy]}>{moduleCopy[module].detail}</Text>
         {(module === 'WAIVER_CHECK_IN' || module === 'ATHLETE_CHECK_IN') && assignment.waiverRequired ? <Text style={styles.waiverNote}>Event waiver {assignment.waiverVersion ? `version ${assignment.waiverVersion}` : 'is configured'} will be verified as part of athlete check-in.</Text> : null}
+        {module === 'COUNTER' && assignment.customCounters?.length ? <View style={styles.pointSection}><Text style={styles.inputLabel}>ASSIGNED CUSTOM COUNTER</Text><View style={styles.pointGrid}>{assignment.customCounters.map((counter) => <Pressable key={counter.id} onPress={() => setCustomCounterId(counter.id)} style={[styles.pointChip, (customCounterId || assignment.customCounters[0]?.id) === counter.id && styles.pointChipActive]}><Text style={[styles.pointText, (customCounterId || assignment.customCounters[0]?.id) === counter.id && styles.pointTextActive]}>{counter.name}</Text><Text style={[styles.athleteMeta, (customCounterId || assignment.customCounters[0]?.id) === counter.id && styles.pointTextActive]}>{counter.itemName}</Text></Pressable>)}</View></View> : null}
         {operationsOverviewPanel()}
         {module === 'MANUAL_TIMING' ? <View style={styles.pointSection}><View style={styles.eventClock}><Text style={styles.eventClockLabel}>EVENT TIME OF DAY · DEVICE CLOCK</Text><Text style={styles.eventClockTime}>{timeOfDay(deviceNow)}</Text><Text style={styles.eventClockMeta}>{calendarDay(deviceNow)} · {deviceTimeZone}</Text><Text style={styles.eventClockSource}>The exact device timestamp is captured when “Stamp now” is pressed.</Text></View><View style={styles.gunStartPanel}><View style={styles.gunStartHeader}><Text style={styles.gunStartTitle}>FEIBOT CONTEST GUN TIMES</Text><Text style={styles.gunStartZone}>IST</Text></View>{contestGunStarts.length ? contestGunStarts.map((contest) => <View key={contest.uuid} style={styles.gunStartRow}><Text style={styles.gunStartName}>{contest.name}</Text><Text style={styles.gunStartTime}>{feibotGunTime(contest.gunStartAt)}</Text></View>) : <Text style={styles.gunStartEmpty}>No Feibot contest gun times are stored. Import timing rules in the admin panel.</Text>}</View><Text style={styles.inputLabel}>{assignment.timingScope === 'AUTO' ? 'AUTOMATIC TIMING MODE' : 'ASSIGNED TIMING POINT'}</Text><View style={styles.pointGrid}>{assignment.timingPointIds.map((id, index) => <Pressable key={id} onPress={() => setTimingPointId(id)} style={[styles.pointChip, selectedTimingPointId === id && styles.pointChipActive]}><Text style={[styles.pointText, selectedTimingPointId === id && styles.pointTextActive]}>{assignment.timingPointNames[index] || id}</Text></Pressable>)}</View>{assignment.timingScope === 'AUTO' ? <Text style={styles.autoTimingNote}>{assignment.manualGunFallback ? 'No provider point is required. The athlete’s official Feibot contest gun time is used automatically.' : 'This assignment follows the event FINISH point and uses the athlete’s official Feibot contest gun time.'}</Text> : null}</View> : null}
         {module === 'FINISH_LINE_VOLUNTEER'
           ? <FinishLineScreen eventId={assignment.eventId} />
           : module === 'CUTOFF_TIME_VOLUNTEER'
             ? <CutoffTimeScreen eventId={assignment.eventId} />
+          : module === 'PAID_FOOD_COUNTER'
+            ? <PaidFoodScreen eventId={assignment.eventId} />
           : module === 'MANUAL_TIMING' ? <>
           <View style={styles.bibKeyboardRow}><Text style={styles.bibKeyboardHint}>BIB keyboard</Text><Pressable onPress={() => { setBibKeyboard('numeric'); setTimeout(() => searchInputRef.current?.focus(), 0); }} style={[styles.bibKeyboardOption, bibKeyboard === 'numeric' && styles.bibKeyboardOptionActive]}><Text style={[styles.bibKeyboardOptionText, bibKeyboard === 'numeric' && styles.bibKeyboardOptionTextActive]}>123</Text></Pressable><Pressable onPress={() => { setBibKeyboard('text'); setTimeout(() => searchInputRef.current?.focus(), 0); }} style={[styles.bibKeyboardOption, bibKeyboard === 'text' && styles.bibKeyboardOptionActive]}><Text style={[styles.bibKeyboardOptionText, bibKeyboard === 'text' && styles.bibKeyboardOptionTextActive]}>ABC</Text></Pressable></View>
           <View style={styles.manualStampRow}><TextInput key={bibKeyboard} ref={searchInputRef} value={query} onChangeText={(value) => { setQuery(value); if (/[A-Za-z]/.test(value)) setBibKeyboard('text'); }} onSubmitEditing={() => void stampManualTiming()} keyboardType={bibKeyboard === 'numeric' ? 'number-pad' : 'default'} returnKeyType="done" autoCapitalize="characters" placeholder="Enter BIB" placeholderTextColor="#7c898f" style={styles.searchInput} /><Pressable disabled={!query.trim() || busyId === 'manual-timing'} onPress={() => void stampManualTiming()} style={[styles.manualStampButton, (!query.trim() || busyId === 'manual-timing') && styles.disabled]}>{busyId === 'manual-timing' ? <ActivityIndicator color="#fff" /> : <Text style={styles.manualStampButtonText}>STAMP</Text>}</Pressable></View>
           {message ? <Text style={styles.success}>{message}</Text> : null}{error ? <Text style={styles.errorText}>{error}</Text> : null}
           <View style={styles.recentTimingHeader}><Text style={styles.recentTimingTitle}>RECENT STAMPS</Text><Pressable disabled={recentTimingLoading} onPress={() => void refreshRecentTiming()} style={styles.recentRefresh}><Text style={styles.recentRefreshText}>{recentTimingLoading ? 'LOADING…' : 'REFRESH'}</Text></Pressable></View>
-          {recentTimingLoading && recentTiming.length === 0 ? <ActivityIndicator color="#d9233f" style={styles.cardLoader} /> : recentTiming.length === 0 ? <Text style={styles.recentTimingEmpty}>No active Timekeeper stamps for this event.</Text> : recentTiming.map((row) => <View key={row.id} style={styles.recentTimingCard}><View style={styles.recentTimingMain}><Text style={styles.recentTimingBib}>BIB {row.bib || '—'}</Text><Text style={styles.recentTimingName}>{row.athleteName || 'Athlete'}</Text><Text style={styles.recentTimingMeta}>{row.timingPointName || 'Manual Finish'} · {timeOfDay(new Date(row.capturedAt))}{row.gunTime ? ` · Gun ${row.gunTime}` : ''}</Text></View><Pressable disabled={resettingTimingId === row.id} onPress={() => confirmResetTiming(row)} style={[styles.resetTimingButton, resettingTimingId === row.id && styles.disabled]}>{resettingTimingId === row.id ? <ActivityIndicator color="#9b2730" /> : <Text style={styles.resetTimingText}>RESET</Text>}</Pressable></View>)}
+          {recentTimingLoading && recentTiming.length === 0 ? <ActivityIndicator color="#d9233f" style={styles.cardLoader} /> : recentTiming.length === 0 ? <Text style={styles.recentTimingEmpty}>No active Timekeeper stamps for this event.</Text> : recentTiming.map((row) => <View key={row.id} style={styles.recentTimingCard}><View style={styles.recentTimingMain}><Text style={styles.recentTimingBib}>BIB {row.bib || '—'}</Text><Text style={styles.recentTimingName}>{row.athleteName || 'Athlete'}</Text><Text style={styles.recentTimingMeta}>{row.timingPointName || 'Manual Finish'} · {timeOfDay(new Date(row.capturedAt))}{row.gunTime ? ` · Gun ${row.gunTime}` : ''}{row.overallRank ? ` · Overall #${row.overallRank}` : ''}{row.categoryRank ? ` · Category #${row.categoryRank}` : ''}{row.genderRank ? ` · Gender #${row.genderRank}` : ''}{row.ageGroupRank ? ` · Age #${row.ageGroupRank}` : ''}</Text>{row.clockWarning ? <Text style={styles.errorText}>{row.clockWarning}</Text> : null}</View><Pressable disabled={resettingTimingId === row.id} onPress={() => confirmResetTiming(row)} style={[styles.resetTimingButton, resettingTimingId === row.id && styles.disabled]}>{resettingTimingId === row.id ? <ActivityIndicator color="#9b2730" /> : <Text style={styles.resetTimingText}>RESET</Text>}</Pressable></View>)}
         </>
           : module === 'VOLUNTEER_BAND_ASSIGNMENT_COUNTER' ? <>
           <View style={styles.searchRow}><TextInput value={volunteerQuery} onChangeText={setVolunteerQuery} onSubmitEditing={() => void searchVolunteerTargets()} placeholder="Volunteer name, email or mobile" placeholderTextColor="#7c898f" style={styles.searchInput} /><Pressable onPress={() => void searchVolunteerTargets()} disabled={searching} style={styles.searchButton}>{searching ? <ActivityIndicator color="#fff" /> : <Text style={styles.searchButtonText}>SEARCH</Text>}</Pressable></View>
@@ -717,26 +821,26 @@ export function DashboardScreen({ session, onRefreshSession, onOpenAthleteProfil
           <View style={styles.chipSearchRow}><TextInput value={query} onChangeText={setQuery} onSubmitEditing={() => void search()} autoCapitalize="characters" placeholder={chipSearchMode === 'BIB Number' ? 'Enter BIB number' : 'Enter athlete band'} placeholderTextColor="#7c898f" style={styles.chipSearchInput} /><Pressable onPress={() => void search()} disabled={searching} style={[styles.chipSearchButton, searching && styles.disabled]}>{searching ? <ActivityIndicator color="#071722" /> : <Text style={styles.chipSearchButtonText}>Search</Text>}</Pressable></View>
           <Pressable onPress={() => { setScannerMode('athlete-search'); setScannerOpen(true); }} style={styles.chipScanButton}><Text style={styles.chipScanButtonText}>▣  Scan Athlete Band</Text></Pressable>
           {message ? <Text style={styles.success}>{message}</Text> : null}{error ? <Text style={styles.errorText}>{error}</Text> : null}
-          {searchData?.participants.map((participant) => {
+          {displayedChipParticipants.map((participant) => {
             const waiverVerified = Boolean(participant.state.waiverVerifiedAt) || !assignment.waiverRequired;
             const pending = busyId === participant.id;
             return <View key={participant.id} style={styles.chipResultBlock}>
               <View style={styles.chipAthleteCard}>
-                <View style={styles.chipIdentityRow}><View style={styles.chipInitialsCircle}><Text style={styles.chipInitialsText}>{initials(participant.name)}</Text></View><Text style={styles.chipAthleteName}>{participant.name}</Text></View>
+                <View style={styles.chipIdentityRow}><View style={styles.chipInitialsCircle}><Text style={styles.chipInitialsText}>{initials(participant.participationMode === 'RELAY' ? participant.relayTeamName || participant.name : participant.name)}</Text></View><Text style={styles.chipAthleteName}>{participant.participationMode === 'RELAY' ? participant.relayTeamName || `Relay Team ${participant.bib}` : participant.name}</Text></View>
                 <View style={styles.chipCardDivider} />
                 <View style={styles.chipFactsGrid}>
                   <View style={styles.chipFactCell}><Text style={styles.chipFactLabel}>BIB:</Text><Text style={styles.chipFactAccent}>{participant.bib || '—'}</Text></View>
                   <View style={styles.chipFactCell}><Text style={styles.chipFactLabel}>Category:</Text><Text style={styles.chipFactValue}>{participant.category || 'Not assigned'}</Text></View>
                   <View style={styles.chipFactCell}><Text style={styles.chipFactLabel}>Gender:</Text><Text style={styles.chipFactValue}>{participant.gender || 'Not recorded'}</Text></View>
                   <View style={styles.chipFactCell}><Text style={styles.chipFactLabel}>Waiver:</Text><Text style={[styles.chipFactValue, waiverVerified ? styles.chipWaiverVerified : styles.chipWaiverPending]}>{waiverVerified ? '✓ WAIVER SIGNED' : '✕ WAIVER NOT VERIFIED'}</Text></View>
-                  <View style={styles.chipFactCell}><Text style={styles.chipFactLabel}>Timing Chip:</Text><Text style={[styles.chipFactValue, participant.chipCode ? styles.chipFactAssigned : undefined]}>{participant.chipCode || 'Not Assigned'}</Text></View>
+                  <View style={styles.chipFactCell}><Text style={styles.chipFactLabel}>{participant.participationMode === 'RELAY' ? 'Team Timing Chip:' : 'Timing Chip:'}</Text><Text style={[styles.chipFactValue, participant.chipCode ? styles.chipFactAssigned : undefined]}>{participant.chipCode || 'Not Assigned'}</Text></View>
                 </View>
               </View>
               {participant.chipCode ? <View style={styles.chipAssignedPanel}>
                 <Text style={styles.chipAssignedTitle}>✓ Chip Already Assigned</Text>
                 <Text style={styles.chipAssignedCopy}>{participant.chipCode}. Replacement requires an authorized administrator.</Text>
               </View> : <>
-                <Text style={styles.chipAssignmentPrompt}>Scan or enter the timing chip code</Text>
+                <Text style={styles.chipAssignmentPrompt}>{participant.participationMode === 'RELAY' ? 'Assign one timing chip to the complete relay team' : 'Scan or enter the timing chip code'}</Text>
                 <TextInput autoCapitalize="characters" value={assignmentCode} onChangeText={(value) => { setAssignmentCode(value); setChipOwner(null); setChipOwnerLoading(value.trim().length >= 2); }} placeholder="Enter timing chip code" placeholderTextColor="#84939c" style={styles.chipCodeInput} />
                 {chipOwnerLoading ? <View style={styles.chipOwnerPanel}><ActivityIndicator color="#a05b08" /><Text style={styles.chipOwnerLoading}>Checking previous chip assignment…</Text></View> : chipOwner ? <View style={styles.chipOwnerPanel}><Text style={styles.chipOwnerTitle}>CHIP ALREADY ASSIGNED</Text><Text style={styles.chipOwnerName}>{assignmentCode.trim().toUpperCase()} · {chipOwner.name}</Text><Text style={styles.chipOwnerMeta}>BIB {chipOwner.bib || '—'} · {chipOwner.category || 'Category not recorded'}</Text></View> : assignmentCode.trim().length >= 2 ? <Text style={styles.chipAvailable}>✓ No previous athlete assignment found for this chip.</Text> : null}
                 <Pressable onPress={() => { setScannerMode('assignment-code'); setScannerOpen(true); }} style={styles.chipScanButton}><Text style={styles.chipScanButtonText}>▣  Scan Chip Barcode</Text></Pressable>
@@ -746,12 +850,12 @@ export function DashboardScreen({ session, onRefreshSession, onOpenAthleteProfil
           })}
         </> : <>
           {module === 'ATHLETE_BAND_ASSIGNMENT_COUNTER' ? <View style={styles.searchRow}><TextInput autoCapitalize="characters" value={assignmentCode} onChangeText={setAssignmentCode} placeholder="Athlete band code to assign" placeholderTextColor="#7c898f" style={styles.searchInput} /><Pressable onPress={() => { setScannerMode('assignment-code'); setScannerOpen(true); }} style={styles.searchButton}><Text style={styles.searchButtonText}>SCAN BAND</Text></Pressable></View> : null}
-          {(module === 'WAIVER_CHECK_IN' || module === 'ATHLETE_CHECK_IN') ? <View style={styles.searchModeRow}>{(['BIB Number', 'Registration ID', 'Athlete Band', 'Name', 'Email', 'Mobile'] as WaiverSearchMode[]).map((mode) => <Pressable key={mode} onPress={() => { setWaiverSearchMode(mode); setQuery(''); setSearchData(null); setSelectedRegistrationIds([]); setMessage(null); setError(null); }} style={[styles.searchModeChip, waiverSearchMode === mode && styles.searchModeChipActive]}><Text style={[styles.searchModeText, waiverSearchMode === mode && styles.searchModeTextActive]}>{mode}</Text></Pressable>)}</View> : null}
-          <View style={styles.searchRow}><TextInput value={query} onChangeText={setQuery} onSubmitEditing={() => void search()} keyboardType={(module === 'WAIVER_CHECK_IN' || module === 'ATHLETE_CHECK_IN') && waiverSearchMode === 'Mobile' ? 'phone-pad' : (module === 'WAIVER_CHECK_IN' || module === 'ATHLETE_CHECK_IN') && waiverSearchMode === 'Email' ? 'email-address' : 'default'} autoCapitalize={(module === 'WAIVER_CHECK_IN' || module === 'ATHLETE_CHECK_IN') && waiverSearchMode === 'Email' ? 'none' : 'sentences'} placeholder={module === 'WAIVER_CHECK_IN' || module === 'ATHLETE_CHECK_IN' ? `Enter ${waiverSearchMode.toLowerCase()}` : 'BIB, band, chip, name or email'} placeholderTextColor="#7c898f" style={styles.searchInput} /><Pressable onPress={() => void search()} disabled={searching} style={styles.searchButton}>{searching ? <ActivityIndicator color="#fff" /> : <Text style={styles.searchButtonText}>SEARCH</Text>}</Pressable></View>
+          {(module === 'WAIVER_CHECK_IN' || module === 'ATHLETE_CHECK_IN') ? <View style={styles.searchModeRow}>{(['BIB Number', 'Registration ID', 'Athlete Band', 'Name / Email', 'Mobile'] as WaiverSearchMode[]).map((mode) => <Pressable key={mode} onPress={() => { setWaiverSearchMode(mode); setQuery(''); setSearchData(null); setSelectedRegistrationIds([]); setMessage(null); setError(null); }} style={[styles.searchModeChip, waiverSearchMode === mode && styles.searchModeChipActive]}><Text style={[styles.searchModeText, waiverSearchMode === mode && styles.searchModeTextActive]}>{mode}</Text></Pressable>)}</View> : null}
+          <View style={styles.searchRow}><TextInput value={query} onChangeText={setQuery} onSubmitEditing={() => void search()} keyboardType={(module === 'WAIVER_CHECK_IN' || module === 'ATHLETE_CHECK_IN') && waiverSearchMode === 'Mobile' ? 'phone-pad' : 'default'} autoCapitalize={(module === 'WAIVER_CHECK_IN' || module === 'ATHLETE_CHECK_IN') && waiverSearchMode === 'Name / Email' ? 'none' : 'sentences'} placeholder={module === 'WAIVER_CHECK_IN' || module === 'ATHLETE_CHECK_IN' ? waiverSearchMode === 'Name / Email' ? 'Enter name or email' : `Enter ${waiverSearchMode.toLowerCase()}` : 'BIB, band, chip, name or email'} placeholderTextColor="#7c898f" style={styles.searchInput} /><Pressable onPress={() => void search()} disabled={searching} style={styles.searchButton}>{searching ? <ActivityIndicator color="#fff" /> : <Text style={styles.searchButtonText}>SEARCH</Text>}</Pressable></View>
           {(module === 'WAIVER_CHECK_IN' || module === 'ATHLETE_CHECK_IN') && waiverSearchMode === 'Athlete Band' ? <Pressable onPress={() => { setScannerMode('athlete-search'); setScannerOpen(true); }} style={styles.scanButton}><Text style={styles.scanButtonText}>▣  SCAN ATHLETE BAND</Text></Pressable> : null}
           {module !== 'WAIVER_CHECK_IN' && module !== 'ATHLETE_CHECK_IN' ? <Pressable onPress={() => { setScannerMode('athlete-search'); setScannerOpen(true); }} style={styles.scanButton}><Text style={styles.scanButtonText}>▣  SCAN ATHLETE BAND / CHIP / BIB</Text></Pressable> : null}
           {message ? <Text style={styles.success}>{message}</Text> : null}{error ? <Text style={styles.errorText}>{error}</Text> : null}
-          {(module === 'WAIVER_CHECK_IN' || module === 'ATHLETE_CHECK_IN') && searchData?.participantProfiles?.length ? <View style={styles.multiRegistrationPanel}>
+          {(module === 'WAIVER_CHECK_IN' || module === 'ATHLETE_CHECK_IN') && !searchedRelayTeam && searchData?.participantProfiles?.length ? <View style={styles.multiRegistrationPanel}>
             <Text style={styles.multiRegistrationTitle}>{searchData.participantProfiles.length > 1 ? 'MULTIPLE PARTICIPANTS FOUND' : searchData.participantProfiles[0].registrations.length > 1 ? 'MULTIPLE REGISTRATIONS FOUND' : 'PARTICIPANT REGISTRATION'}</Text>
             {searchData.participantProfiles.map((profile) => <View key={profile.participantId} style={styles.profileGroup}>
               <Text style={styles.profileName}>{profile.name}</Text><Text style={styles.profileMeta}>{profile.email || profile.mobile || profile.participantId} · {profile.registrations.length} registration{profile.registrations.length === 1 ? '' : 's'}</Text>
@@ -766,15 +870,21 @@ export function DashboardScreen({ session, onRefreshSession, onOpenAthleteProfil
             <Text style={styles.relayTeamEyebrow}>RELAY TEAM · BIB {searchedRelayTeam.bib}</Text>
             <Text style={styles.relayTeamName}>{searchedRelayTeam.name}</Text>
             <Text style={styles.relayTeamMeta}>{searchData?.participants[0]?.category || 'Relay contest'} · {searchedRelayTeam.size} registered athletes</Text>
+            <Text style={[styles.relayTeamStat, searchedRelayTeam.teamChipCode && styles.relayTeamComplete]}>TEAM TIMING CHIP · {searchedRelayTeam.teamChipCode || 'NOT ASSIGNED'}</Text>
             <View style={styles.relayTeamStats}><Text style={styles.relayTeamStat}>{searchedRelayTeam.assignedBands} assigned bands</Text><Text style={styles.relayTeamStat}>{searchedRelayTeam.remainingBands} remaining</Text><Text style={[styles.relayTeamStat, searchedRelayTeam.teamWaiverCompleted && styles.relayTeamComplete]}>{searchedRelayTeam.teamWaiverCompleted ? '✓ Team waiver completed' : `${searchedRelayTeam.waiverCompletedMembers}/${searchedRelayTeam.size} waivers signed`}</Text><Text style={[styles.relayTeamStat, searchedRelayTeam.fullyCheckedIn && styles.relayTeamComplete]}>{searchedRelayTeam.fullyCheckedIn ? '✓ Team fully checked in' : `${searchedRelayTeam.checkedInMembers}/${searchedRelayTeam.size} checked in`}</Text></View>
-            {searchedRelayTeam.members.map((member) => <View key={member.id} style={styles.relayMemberRow}><View style={styles.relayMemberIdentity}><Text style={styles.relayMemberName}>{member.memberNumber ? `${member.memberNumber}. ` : ''}{member.name}</Text><Text style={styles.relayMemberRole}>{member.memberRole || 'Relay athlete'}{member.email ? ` · ${member.email}` : ''}</Text></View><View><Text style={styles.relayMemberBand}>{member.athleteBandCode || 'Band pending'}</Text><Text style={[styles.relayMemberStatus, member.waiverVerified && styles.relayMemberDone]}>{member.waiverVerified ? `✓ Waiver signed${member.waiverVerifiedAt ? ` · ${formatted(member.waiverVerifiedAt)}` : ''}` : 'Waiver pending'}</Text><Text style={[styles.relayMemberStatus, member.checkedIn && styles.relayMemberDone]}>{member.checkedIn ? '✓ Checked in' : 'Check-in pending'}</Text></View></View>)}
+            {searchedRelayTeam.members.map((member) => { const relayParticipant = searchData?.participants.find((participant) => participant.id === member.id); return <View key={member.id} style={styles.relayMemberCard}>
+              <View style={styles.relayMemberHeader}><View style={styles.relayMemberIdentity}><Text style={styles.relayMemberName}>{member.memberNumber ? `${member.memberNumber}. ` : ''}{member.name}</Text><Text style={styles.relayMemberRole}>{member.memberRole || 'Relay athlete'}</Text></View><View style={styles.relayMemberShirt}><Text style={styles.relayMemberShirtLabel}>T-SHIRT</Text><Text style={styles.relayMemberShirtValue}>{member.tshirtSize || '—'}</Text></View></View>
+              <View style={styles.relayMemberState}><Text style={styles.relayMemberBand}>{member.athleteBandCode || 'Band pending'}</Text><Text style={[styles.relayMemberStatus, member.chipCode && styles.relayMemberDone]}>{member.chipCode ? `✓ Team chip ${member.chipCode}` : 'Team chip pending'}</Text><Text style={[styles.relayMemberStatus, member.waiverVerified && styles.relayMemberDone]}>{member.waiverVerified ? `✓ Waiver signed${member.waiverVerifiedAt ? ` · ${formatted(member.waiverVerifiedAt)}` : ''}` : 'Waiver pending'}</Text><Text style={[styles.relayMemberStatus, member.checkedIn && styles.relayMemberDone]}>{member.checkedIn ? '✓ Checked in' : 'Check-in pending'}</Text></View>
+              {(module === 'WAIVER_CHECK_IN' || module === 'ATHLETE_CHECK_IN') && relayParticipant ? <><Pressable disabled={assignment.waiverRequired && !member.waiverVerified} style={[styles.assignBandCardButton, assignment.waiverRequired && !member.waiverVerified && styles.disabled]} onPress={() => openBandAssignment(relayParticipant)}><Text style={styles.assignBandCardButtonText}>{member.athleteBandCode ? 'Replace Athlete Band' : `Assign Athlete Band ${member.memberNumber || ''}`}</Text></Pressable>{busyId === relayParticipant.id ? <ActivityIndicator color="#ff6b21" style={styles.cardLoader} /> : actionControl(relayParticipant)}</> : null}
+            </View>; })}
           </View> : null}
-          {searchData?.participants.map((participant) => {
+          {displayedSearchParticipants.map((participant) => {
             const status = activeStatus(participant, module);
             return <View key={participant.id} style={styles.athleteCard}>
               {(module === 'WAIVER_CHECK_IN' || module === 'ATHLETE_CHECK_IN') ? <View style={styles.waiverIdentity}><View style={styles.initialsCircle}><Text style={styles.initialsText}>{initials(participant.name)}</Text></View><View style={styles.waiverIdentityText}><Text style={styles.waiverAthleteName}>{participant.name}</Text><Text style={styles.athleteMeta}>{participant.email || participant.mobile || 'Registered athlete'}</Text></View></View> : <View style={styles.athleteTop}><View style={styles.bibBox}><Text style={styles.bibLabel}>BIB</Text><Text style={styles.bibValue}>{participant.bib || '—'}</Text></View><View style={styles.athleteIdentity}><Text style={styles.athleteName}>{participant.name}</Text><Text style={styles.athleteMeta}>{participant.category || 'Unassigned category'} · {[participant.gender, participant.ageGroup].filter(Boolean).join(' ') || 'Open'}</Text></View><Text style={[styles.status, status.done && styles.statusDone]}>{status.done ? `✓ ${status.label}` : status.label}</Text></View>}
               {(module === 'WAIVER_CHECK_IN' || module === 'ATHLETE_CHECK_IN') ? (() => { const relayWaiverPending = participant.participationMode === 'RELAY' && assignment.waiverRequired && !participant.state.waiverVerifiedAt; return <><View style={styles.tshirtPanel}><Text style={styles.counterPanelLabel}>{participant.participationMode === 'RELAY' ? `TEAM MEMBER ${participant.relayMemberNumber ?? '—'}${participant.relayMemberRole ? ` · ${participant.relayMemberRole.toUpperCase()}` : ''}` : 'T-SHIRT SIZE'}</Text><Text style={styles.tshirtValue}>{participant.tshirtSize || 'NOT RECORDED'}</Text></View><View style={styles.bandPanel}><View style={styles.bandPanelText}><Text style={styles.counterPanelLabel}>ATHLETE BAND NUMBER</Text><Text style={styles.bandValue}>{participant.athleteBandCode || 'NOT ASSIGNED'}</Text></View><Pressable disabled={relayWaiverPending} style={[styles.assignBandCardButton, relayWaiverPending && styles.disabled]} onPress={() => openBandAssignment(participant)}><Text style={styles.assignBandCardButtonText}>{participant.athleteBandCode ? 'Replace Athlete Band' : participant.participationMode === 'RELAY' ? `${participant.relayMemberNumber === 1 ? 'Assign Band 1' : `+ Add Relay Band ${participant.relayMemberNumber ?? ''}`}` : 'Assign Athlete Band'}</Text></Pressable></View>{relayWaiverPending ? <Text style={styles.waiverRequiredWarning}>Complete this athlete’s individual waiver before assigning a wristband.</Text> : null}</>; })() : null}
               {module === 'ATHLETE_LOOKUP' ? <View style={styles.lookupBandPanel}><Text style={styles.counterPanelLabel}>ATHLETE BAND NUMBER</Text><Text style={styles.lookupBandValue}>{participant.athleteBandCode || 'NOT ASSIGNED'}</Text></View> : null}
+              {(module === 'BIKE_CHECK_IN' || module === 'BIKE_CHECK_OUT') && participant.participationMode === 'RELAY' ? <Text style={styles.relayBikeOwner}>TEAM BIKE · CYCLING MEMBER: {participant.name.toUpperCase()}</Text> : null}
               {(module === 'BIKE_CHECK_IN' || module === 'BIKE_CHECK_OUT') ? <View style={styles.bikeRackPanel}><Text style={styles.bikeRackLabel}>{participant.assignedBikeRack ? 'ASSIGNED BIKE RACK' : recordedBikeRack(participant.state.bikeRack) ? 'RECORDED BIKE RACK' : 'BIKE RACK'}</Text><Text style={styles.bikeRackValue}>{displayedBikeRack(participant) || 'NOT ASSIGNED'}</Text><Text style={styles.bikeRackHint}>{displayedBikeRack(participant) ? 'Direct the athlete to this rack' : 'No BIB range covers this athlete yet'}</Text>{participant.assignedBikeRack && recordedBikeRack(participant.state.bikeRack) && participant.assignedBikeRack.toLowerCase() !== recordedBikeRack(participant.state.bikeRack)?.toLowerCase() ? <Text style={styles.bikeRackPrevious}>Previously recorded: {recordedBikeRack(participant.state.bikeRack)}</Text> : null}</View> : null}
               <View style={styles.facts}>{participantFacts(participant).map(([label, value]) => {
                 const confirmed = isConfirmedFact(participant, label);
@@ -887,8 +997,12 @@ const styles = StyleSheet.create({
   recentTimingHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 22, marginBottom: 4 }, recentTimingTitle: { color: '#263238', fontSize: 11, fontWeight: '900', letterSpacing: 1 }, recentRefresh: { borderRadius: 8, borderWidth: 1, borderColor: '#aebbc1', backgroundColor: '#fff', paddingHorizontal: 10, paddingVertical: 7 }, recentRefreshText: { color: '#43535b', fontSize: 9, fontWeight: '900' }, recentTimingEmpty: { color: '#647078', backgroundColor: '#e6ebed', borderRadius: 11, padding: 12, fontSize: 11, marginTop: 8 }, recentTimingCard: { flexDirection: 'row', alignItems: 'center', borderRadius: 13, borderWidth: 1, borderColor: '#d2d9dc', backgroundColor: '#fff', padding: 12, marginTop: 8 }, recentTimingMain: { flex: 1, paddingRight: 10 }, recentTimingBib: { color: '#d9233f', fontSize: 13, fontWeight: '900' }, recentTimingName: { color: '#111518', fontSize: 12, fontWeight: '900', marginTop: 3 }, recentTimingMeta: { color: '#647078', fontSize: 9, marginTop: 4 }, resetTimingButton: { minWidth: 62, minHeight: 38, borderRadius: 9, borderWidth: 1, borderColor: '#d9233f', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 9 }, resetTimingText: { color: '#9b2730', fontSize: 9, fontWeight: '900' },
   searchRow: { flexDirection: 'row', gap: 8, marginTop: 16 }, searchInput: { flex: 1, height: 50, borderRadius: 13, borderWidth: 1, borderColor: '#c8d0d4', backgroundColor: '#fff', color: '#111518', paddingHorizontal: 13, fontSize: 13 }, searchButton: { minWidth: 78, borderRadius: 13, backgroundColor: '#111518', alignItems: 'center', justifyContent: 'center' }, searchButtonText: { color: '#fff', fontSize: 10, fontWeight: '900' }, scanButton: { minHeight: 44, borderRadius: 12, borderWidth: 1, borderColor: '#ff6b21', alignItems: 'center', justifyContent: 'center', marginTop: 9 }, scanButtonText: { color: '#d95616', fontSize: 11, fontWeight: '900' },
   success: { color: '#23613a', backgroundColor: '#dff3e5', borderRadius: 10, padding: 10, fontSize: 11, fontWeight: '800', marginTop: 12 }, errorText: { color: '#9b2730', backgroundColor: '#ffe5e7', borderRadius: 10, padding: 10, fontSize: 11, fontWeight: '800', marginTop: 12 },
-  relayTeamPanel: { borderRadius: 15, borderWidth: 1, borderColor: '#7bcbd8', backgroundColor: '#e7f8fb', padding: 14, marginTop: 13 }, relayTeamEyebrow: { color: '#087b91', fontSize: 10, fontWeight: '900', letterSpacing: 0.8 }, relayTeamName: { color: '#071722', fontSize: 19, fontWeight: '900', marginTop: 5 }, relayTeamMeta: { color: '#536873', fontSize: 11, fontWeight: '700', marginTop: 4 }, relayTeamStats: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 11 }, relayTeamStat: { color: '#36545f', backgroundColor: '#fff', borderRadius: 8, paddingHorizontal: 9, paddingVertical: 7, fontSize: 9, fontWeight: '900' }, relayTeamComplete: { color: '#147a3c', backgroundColor: '#dcf5e5' },
-  relayMemberRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, borderTopWidth: 1, borderTopColor: '#bfdee4', paddingTop: 9, marginTop: 9 }, relayMemberIdentity: { flex: 1, minWidth: 0 }, relayMemberName: { color: '#142d36', fontSize: 11, fontWeight: '900' }, relayMemberRole: { color: '#607984', fontSize: 9, marginTop: 2 }, relayMemberBand: { color: '#087b91', fontSize: 10, fontWeight: '900', textAlign: 'right' }, relayMemberStatus: { color: '#9a5c0a', fontSize: 8, fontWeight: '800', textAlign: 'right', marginTop: 2 }, relayMemberDone: { color: '#147a3c' },
+  relayTeamPanel: { borderRadius: 15, borderWidth: 1, borderColor: '#7bcbd8', backgroundColor: '#e7f8fb', padding: 14, marginTop: 13 }, relayTeamEyebrow: { color: '#087b91', fontSize: 10, fontWeight: '900', letterSpacing: 0.8 }, relayTeamName: { color: '#071722', fontSize: 19, fontWeight: '900', marginTop: 5 }, relayTeamMeta: { color: '#536873', fontSize: 11, fontWeight: '700', marginTop: 4 }, relayTeamStats: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 11 }, relayTeamStat: { color: '#36545f', backgroundColor: '#fff', borderRadius: 8, paddingHorizontal: 9, paddingVertical: 7, fontSize: 9, fontWeight: '900' }, relayTeamComplete: { color: '#147a3c', backgroundColor: '#dcf5e5' }, relayBikeOwner: { color: '#087b91', backgroundColor: '#e7f8fb', borderRadius: 9, paddingHorizontal: 10, paddingVertical: 8, marginTop: 12, fontSize: 10, fontWeight: '900', letterSpacing: 0.4 },
+  relayMemberCard: { borderTopWidth: 1, borderTopColor: '#bfdee4', paddingTop: 11, marginTop: 11 },
+  relayMemberHeader: { flexDirection: 'row', alignItems: 'center', gap: 10 }, relayMemberIdentity: { flex: 1, minWidth: 0 }, relayMemberName: { color: '#142d36', fontSize: 13, fontWeight: '900' }, relayMemberRole: { color: '#087b91', fontSize: 10, fontWeight: '900', marginTop: 2, textTransform: 'uppercase' },
+  relayMemberShirt: { minWidth: 58, borderRadius: 9, backgroundColor: '#ffbf26', paddingHorizontal: 10, paddingVertical: 7, alignItems: 'center' }, relayMemberShirtLabel: { color: '#65400a', fontSize: 7, fontWeight: '900' }, relayMemberShirtValue: { color: '#2b1705', fontSize: 17, fontWeight: '900', marginTop: 1 },
+  relayMemberDetails: { flexDirection: 'row', flexWrap: 'wrap', gap: 5, marginTop: 9 }, relayMemberDetail: { width: '47%', flexGrow: 1, color: '#49636d', backgroundColor: '#fff', borderRadius: 7, padding: 7, fontSize: 8, fontWeight: '700' }, relayMemberDetailWide: { width: '100%', color: '#49636d', backgroundColor: '#fff', borderRadius: 7, padding: 7, fontSize: 8, fontWeight: '700' },
+  relayMemberState: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 7, marginTop: 8 }, relayMemberBand: { color: '#087b91', fontSize: 9, fontWeight: '900' }, relayMemberStatus: { color: '#9a5c0a', fontSize: 8, fontWeight: '800' }, relayMemberDone: { color: '#147a3c' },
   athleteCard: { borderRadius: 17, borderWidth: 1, borderColor: '#d2d9dc', backgroundColor: '#fff', padding: 13, marginTop: 13 }, athleteTop: { flexDirection: 'row', alignItems: 'center' }, bibBox: { minWidth: 52, height: 52, borderRadius: 12, backgroundColor: '#111518', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6 }, bibLabel: { color: '#8d9ba2', fontSize: 7, fontWeight: '900' }, bibValue: { color: '#ff6b21', fontSize: 15, fontWeight: '900', marginTop: 1 }, athleteIdentity: { flex: 1, marginLeft: 10 }, athleteName: { color: '#111518', fontSize: 14, fontWeight: '900' }, athleteMeta: { color: '#6f7a80', fontSize: 9, lineHeight: 13, marginTop: 3 }, status: { maxWidth: 95, color: '#79570c', backgroundColor: '#fff0bf', borderRadius: 8, paddingHorizontal: 7, paddingVertical: 5, overflow: 'hidden', fontSize: 8, fontWeight: '900', textAlign: 'center' }, statusDone: { color: '#23613a', backgroundColor: '#dff3e5' }, facts: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 11 }, fact: { width: '47%', flexGrow: 1, color: '#526067', backgroundColor: '#eef2f3', borderRadius: 8, padding: 7, fontSize: 9, fontWeight: '700' }, factConfirmed: { backgroundColor: '#e0f5e8' }, factConfirmedText: { color: '#16743d', fontWeight: '900' }, factWarning: { color: '#b42318', backgroundColor: '#fee4e2', fontWeight: '900' },
   waiverIdentity: { flexDirection: 'row', alignItems: 'center', marginBottom: 14 }, initialsCircle: { width: 58, height: 58, borderRadius: 29, borderWidth: 2, borderColor: '#abe3ec', backgroundColor: '#e0f5f8', alignItems: 'center', justifyContent: 'center' }, initialsText: { color: '#087b91', fontSize: 20, fontWeight: '900' }, waiverIdentityText: { flex: 1, marginLeft: 12 }, waiverAthleteName: { color: '#071722', fontSize: 18, fontWeight: '900' }, tshirtPanel: { borderRadius: 13, borderWidth: 1, borderColor: '#d78a00', backgroundColor: '#ffbf26', paddingHorizontal: 14, paddingVertical: 14 }, counterPanelLabel: { color: '#164657', fontSize: 9, fontWeight: '900', letterSpacing: 1.1 }, tshirtValue: { color: '#2b1705', fontSize: 24, fontWeight: '900', marginTop: 5 }, bandPanel: { flexDirection: 'row', alignItems: 'center', borderRadius: 13, borderWidth: 1, borderColor: '#80d1df', backgroundColor: '#e4f7fa', padding: 13, marginTop: 10 }, bandPanelText: { flex: 1, paddingRight: 8 }, bandValue: { color: '#071722', fontSize: 17, fontWeight: '900', marginTop: 5 }, assignBandCardButton: { minHeight: 44, borderRadius: 11, backgroundColor: '#087b91', paddingHorizontal: 13, alignItems: 'center', justifyContent: 'center' }, assignBandCardButtonText: { color: '#fff', fontSize: 10, fontWeight: '900', textAlign: 'center' },
   lookupBandPanel: { borderRadius: 13, borderWidth: 1, borderColor: '#80d1df', backgroundColor: '#e4f7fa', paddingHorizontal: 13, paddingVertical: 12, marginTop: 11 }, lookupBandValue: { color: '#071722', fontSize: 20, fontWeight: '900', marginTop: 5 },

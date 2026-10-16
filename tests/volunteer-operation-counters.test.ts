@@ -39,4 +39,29 @@ describe("volunteer operation counters", () => {
     expect(result.remainingToBikeCheckIn).toBe(0);
     expect(result.remainingToBikeCheckOut).toBe(0);
   });
+
+  it("counts one team bike owned by the relay cycling member", () => {
+    const participants = [
+      { id: "swimmer", bib: "1501", chipCode: "", registrationWaiverVerifiedAt: "SIGNED", participationMode: "RELAY" as const, relayTeamId: "team-a", relayMemberRole: "Swimming" },
+      { id: "cyclist", bib: "1501", chipCode: "CHIP-C", registrationWaiverVerifiedAt: "SIGNED", participationMode: "RELAY" as const, relayTeamId: "team-a", relayMemberRole: "Cycling" },
+      { id: "runner", bib: "1501", chipCode: "", registrationWaiverVerifiedAt: "SIGNED", participationMode: "RELAY" as const, relayTeamId: "team-a", relayMemberRole: "Running" },
+    ];
+    const states = {
+      swimmer: { checkedInAt: "yes", waiverVerifiedAt: "yes", bikeCheckedInAt: null, bikeCheckedOutAt: null },
+      cyclist: { checkedInAt: "yes", waiverVerifiedAt: "yes", bikeCheckedInAt: "bike-in", bikeCheckedOutAt: null },
+      runner: { checkedInAt: "yes", waiverVerifiedAt: "yes", bikeCheckedInAt: null, bikeCheckedOutAt: null },
+    };
+
+    expect(calculateVolunteerOperationCounters(participants, states)).toMatchObject({
+      totalAthletes: 3,
+      waiverCompletedAthletes: 3,
+      bikesEverCheckedIn: 1,
+      bikesCheckedIn: 1,
+      chipAssignmentTargets: 1,
+      chipsAssigned: 1,
+      chipsAssignedToBikeEntries: 1,
+      remainingToBikeCheckIn: 0,
+      remainingToBikeCheckOut: 1,
+    });
+  });
 });

@@ -12,6 +12,7 @@ import {
 } from "@/lib/volunteer-management";
 import { listAuthoritativeTimingChipAssignmentLogs } from "@/lib/volunteer-operations";
 import { z } from "@/lib/zod";
+import { listVolunteerCustomCounterIssues, listVolunteerCustomCounters } from "@/lib/volunteer-custom-counters";
 
 export const dynamic = "force-dynamic";
 
@@ -24,12 +25,14 @@ export async function GET() {
   const denied = await requireAdmin();
   if (denied) return denied;
   try {
-    const [volunteers, activity, checkIns, manualTiming, chipAssignmentLogs] = await Promise.all([
+    const [volunteers, activity, checkIns, manualTiming, chipAssignmentLogs, customCounters, customCounterIssues] = await Promise.all([
       listVolunteers(),
       listVolunteerActivity(),
       listVolunteerCheckIns(),
       listVolunteerManualTimingWithRanks(),
       listAuthoritativeTimingChipAssignmentLogs(),
+      listVolunteerCustomCounters(),
+      listVolunteerCustomCounterIssues(),
     ]);
     const authoritativeChipKeys = new Set(chipAssignmentLogs.map((row) => `${row.eventId}\u0000${row.participantUid}\u0000${row.status}`));
     const authoritativeCheckIns = [
@@ -37,7 +40,7 @@ export async function GET() {
         || !authoritativeChipKeys.has(`${row.eventId}\u0000${row.participantUid}\u0000${row.status}`)),
       ...chipAssignmentLogs,
     ].sort((left, right) => Date.parse(right.capturedAt) - Date.parse(left.capturedAt));
-    return apiSuccess({ volunteers, activity, checkIns: authoritativeCheckIns, manualTiming }, { headers: { "cache-control": "private, no-store" } });
+    return apiSuccess({ volunteers, activity, checkIns: authoritativeCheckIns, manualTiming, customCounters, customCounterIssues }, { headers: { "cache-control": "private, no-store" } });
   } catch (error) {
     return apiFailure(error instanceof Error ? error.message : "Unable to load volunteer management.", 503);
   }

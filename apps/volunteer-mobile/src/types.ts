@@ -6,6 +6,7 @@ export type VolunteerModule =
   | 'BIKE_CHECK_OUT'
   | 'MEDAL_COUNTER'
   | 'FOOD_COUNTER'
+  | 'PAID_FOOD_COUNTER'
   | 'LOCKER_COUNTER'
   | 'COUNTER'
   | 'FINISH_LINE_VOLUNTEER'
@@ -25,11 +26,29 @@ export type Assignment = {
   modules: VolunteerModule[];
   timingPointIds: string[];
   timingPointNames: string[];
+  customCounterIds: string[];
+  customCounters: CustomCounter[];
   timingScope?: "AUTO" | "RESTRICTED";
   manualGunFallback?: boolean;
   waiverRequired: boolean;
   waiverVersion: string;
   active: boolean;
+};
+
+export type CustomCounter = {
+  id: string;
+  eventId: string;
+  name: string;
+  itemName: string;
+  actionLabel: string;
+  active: boolean;
+  applicableCategories: string[];
+  inventoryUnit: 'litre' | 'kilogram' | 'piece' | 'packet' | 'custom';
+  unitLabel: string;
+  totalInventoryQuantity: number | null;
+  totalServings: number | null;
+  quantityPerServing: number;
+  maxPerParticipant: number;
 };
 
 export type VolunteerSession = {
@@ -97,13 +116,33 @@ export type Participant = {
     bib: string;
     name: string;
     size: 2 | 3;
+    teamChipCode: string;
     assignedBands: number;
     remainingBands: number;
     checkedInMembers: number;
     fullyCheckedIn: boolean;
     waiverCompletedMembers: number;
     teamWaiverCompleted: boolean;
-    members: Array<{ id: string; name: string; email: string | null; memberNumber: number | null; memberRole: string | null; athleteBandCode: string; waiverVerified: boolean; waiverVerifiedAt: string | null; checkedIn: boolean }>;
+    members: Array<{
+      id: string;
+      name: string;
+      email: string | null;
+      mobile: string | null;
+      gender: string;
+      dateOfBirth: string | null;
+      ageGroup: string;
+      tshirtSize: string;
+      bloodGroup: string | null;
+      emergencyContactName: string | null;
+      emergencyContact: string | null;
+      memberNumber: number | null;
+      memberRole: string | null;
+      chipCode: string;
+      athleteBandCode: string;
+      waiverVerified: boolean;
+      waiverVerifiedAt: string | null;
+      checkedIn: boolean;
+    }>;
   };
   assignedBikeRack?: string | null;
   state: ParticipantState;
@@ -136,6 +175,7 @@ export type VolunteerOperationsOverview = {
   bikesCheckedOut: number;
   remainingToBikeCheckIn: number;
   remainingToBikeCheckOut: number;
+  chipAssignmentTargets: number;
   chipsAssigned: number;
   remainingToAssign: number;
   chipsAssignedToBikeEntries: number;
@@ -155,6 +195,13 @@ export type ManualTimingStamp = {
   gunTime?: string | null;
   capturedAt: string;
   status: string;
+  overallRank?: number | null;
+  categoryRank?: number | null;
+  genderRank?: number | null;
+  ageGroupRank?: number | null;
+  rankingElapsedMilliseconds?: number | null;
+  rankingStartSource?: 'CANONICAL' | 'SAVED_GUN' | null;
+  clockWarning?: string | null;
 };
 
 export type ContestGunStart = {

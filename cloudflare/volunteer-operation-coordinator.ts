@@ -25,6 +25,7 @@ type OperationAction = 'CHECK_IN' | 'BIKE_IN' | 'BIKE_OUT' | 'MEDAL_ISSUE' | 'FO
 
 interface ActionRequest {
   participantId: string;
+  relayTeamParticipantIds?: string[];
   action: OperationAction;
   volunteerName: string;
   waiverRequired: boolean;
@@ -397,8 +398,34 @@ export class VolunteerOperationCoordinator extends DurableObject<CloudflareEnv> 
       if (!['CHECK_IN', 'BIKE_IN', 'BIKE_OUT', 'MEDAL_ISSUE', 'FOOD_ISSUE', 'LOCKER_ASSIGN'].includes(body.action)) return Response.json({ ok: false, error: 'Unsupported volunteer action.' }, { status: 400 });
       try {
         const state = await this.ctx.storage.transaction(async (transaction) => {
-          const key = participantKey(body.participantId.trim());
-          const current = { ...emptyState(), ...(await transaction.get<ParticipantState>(key)) };
+          const participantId = body.participantId.trim();
+          const key = participantKey(participantId);
+          let current = { ...emptyState(), ...(await transaction.get<ParticipantState>(key)) };
+          const isBikeAction = body.action === 'BIKE_IN' || body.action === 'BIKE_OUT';
+          const relayParticipantIds = isBikeAction
+            ? [...new Set([participantId, ...(body.relayTeamParticipantIds ?? []).map(String).map((id) => id.trim()).filter(Boolean)])].slice(0, 3)
+            : [participantId];
+          const relayStates = new Map<string, ParticipantState>([[participantId, current]]);
+          if (relayParticipantIds.length > 1) {
+            for (const memberId of relayParticipantIds) {
+              if (memberId !== participantId) relayStates.set(memberId, { ...emptyState(), ...(await transaction.get<ParticipantState>(participantKey(memberId))) });
+            }
+            const legacyHolder = [...relayStates.entries()]
+              .filter(([, state]) => Boolean(state.bikeCheckedInAt))
+              .sort(([, left], [, right]) => {
+                const activeOrder = Number(Boolean(right.bikeCheckedInAt && !right.bikeCheckedOutAt)) - Number(Boolean(left.bikeCheckedInAt && !left.bikeCheckedOutAt));
+                return activeOrder || Date.parse(right.bikeCheckedInAt || '') - Date.parse(left.bikeCheckedInAt || '');
+              })[0];
+            if (legacyHolder && legacyHolder[0] !== participantId) {
+              current = {
+                ...current,
+                bikeCheckedInAt: legacyHolder[1].bikeCheckedInAt,
+                bikeCheckedOutAt: legacyHolder[1].bikeCheckedOutAt,
+                helmetChecked: legacyHolder[1].helmetChecked,
+                bikeRack: legacyHolder[1].bikeRack,
+              };
+            }
+          }
           const next: ParticipantState = { ...current, updatedAt: body.capturedAt, updatedBy: body.volunteerName };
           if (body.action === 'CHECK_IN') {
             Object.assign(next, completeRegistrationCheckIn(current, { waiverRequired: body.waiverRequired, registrationWaiverVerifiedAt: body.registrationWaiverVerifiedAt, capturedAt: body.capturedAt, volunteerName: body.volunteerName }));
@@ -410,7 +437,7 @@ export class VolunteerOperationCoordinator extends DurableObject<CloudflareEnv> 
             next.helmetChecked = Boolean(body.helmetChecked);
             next.bikeRack = body.bikeRack?.trim() || current.bikeRack;
           } else if (body.action === 'BIKE_OUT') {
-            if (!current.bikeCheckedInAt || current.bikeCheckedOutAt) throw new Error('No bike is currently checked in for this athlete.');
+            if (!current.bikeCheckedInAt || current.bikeCheckedOutAt) throw new Error('No bike is currently checked in for this athlete or relay team.');
             next.bikeCheckedOutAt = body.capturedAt;
           } else if (body.action === 'MEDAL_ISSUE') {
             if (current.medalIssuedAt) throw new Error('A medal has already been issued to this athlete.');
@@ -428,6 +455,20 @@ export class VolunteerOperationCoordinator extends DurableObject<CloudflareEnv> 
             next.lockerNumber = locker;
           }
           await transaction.put(key, next);
+          if (isBikeAction && relayParticipantIds.length > 1) {
+            for (const memberId of relayParticipantIds) {
+              if (memberId === participantId) continue;
+              const memberState = relayStates.get(memberId) || emptyState();
+              if (!memberState.bikeCheckedInAt && !memberState.bikeCheckedOutAt && !memberState.bikeRack && !memberState.helmetChecked) continue;
+              await transaction.put(participantKey(memberId), {
+                ...memberState,
+                bikeCheckedInAt: null,
+                bikeCheckedOutAt: null,
+                helmetChecked: false,
+                bikeRack: null,
+              });
+            }
+          }
           return next;
         });
         return Response.json({ ok: true, state });

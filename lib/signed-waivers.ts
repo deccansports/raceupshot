@@ -60,6 +60,7 @@ export interface RelayWaiverTeam {
     name: string;
     email: string;
     role: string;
+    tshirtSize: string;
     memberNumber: number;
     signedAt: string | null;
     completed: boolean;
@@ -91,6 +92,7 @@ function relayWaiverTeam(row: JsonRecord, rows: JsonRecord[]): RelayWaiverTeam |
         name: value(member, "fullName", "name", "athleteName") || "Athlete",
         email: value(member, "email", "emailAddress", "athleteEmail"),
         role: value(member, "relayMemberRole"),
+        tshirtSize: value(member, "tshirtSize", "tShirtSize", "shirtSize"),
         memberNumber: Number(value(member, "relayMemberNumber")) || 0,
         signedAt,
         completed: Boolean(signedAt),
@@ -111,7 +113,7 @@ function relayWaiverTeam(row: JsonRecord, rows: JsonRecord[]): RelayWaiverTeam |
 
 function relayRosterHtml(team: RelayWaiverTeam | null): string {
   if (!team) return "";
-  const members = team.members.map((member) => `<li><strong>${escapePdfHtml(member.name)}</strong>${member.role ? ` — ${escapePdfHtml(member.role)}` : ""}<br><span>${escapePdfHtml(member.email)}</span></li>`).join("");
+  const members = team.members.map((member) => `<li><strong>${escapePdfHtml(member.name)}</strong>${member.role ? ` — ${escapePdfHtml(member.role)}` : ""}${member.tshirtSize ? `<br><span>T-shirt: ${escapePdfHtml(member.tshirtSize)}</span>` : ""}<br><span>${escapePdfHtml(member.email)}</span></li>`).join("");
   return `<section class="raceupshot-relay-team"><h2>RELAY TEAM WAIVER</h2><p><strong>Team Bib:</strong> ${escapePdfHtml(team.bib)}<br><strong>Team Name:</strong> ${escapePdfHtml(team.name)}<br><strong>Registered Athletes:</strong> ${team.members.length} of ${team.size}</p><ol>${members}</ol><p>Each registered athlete must acknowledge and sign this waiver individually.</p></section>`;
 }
 

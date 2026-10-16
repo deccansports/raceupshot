@@ -7,14 +7,18 @@ export interface ResettableVolunteerCheckInState {
   updatedBy: string | null;
 }
 
-type VolunteerWaiverState = Pick<ResettableVolunteerCheckInState, 'waiverVerifiedAt' | 'waiverResetAt'>;
+type VolunteerWaiverState = Pick<ResettableVolunteerCheckInState, 'waiverVerifiedAt' | 'waiverResetAt'>
+  & Partial<Pick<ResettableVolunteerCheckInState, 'emailOtpVerifiedAt'>>;
 
 /** Resolve waiver evidence without mutating counter state or reviving evidence invalidated by a later reset. */
 export function effectiveVolunteerWaiverVerifiedAt(
   state: VolunteerWaiverState,
   registrationVerifiedAt?: string | null,
 ): string | null {
-  const candidates = [state.waiverVerifiedAt, registrationVerifiedAt].filter((value): value is string => Boolean(value));
+  const operationalOtpVerification = state.waiverVerifiedAt && state.emailOtpVerifiedAt
+    ? state.waiverVerifiedAt
+    : null;
+  const candidates = [operationalOtpVerification, registrationVerifiedAt].filter((value): value is string => Boolean(value));
   if (!state.waiverResetAt) return candidates[0] ?? null;
   const resetAt = Date.parse(state.waiverResetAt);
   if (!Number.isFinite(resetAt)) return null;

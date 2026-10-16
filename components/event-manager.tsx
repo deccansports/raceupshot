@@ -487,7 +487,7 @@ export function EventManager({ initialEvents }: { initialEvents: RaceEvent[] }) 
                           </div>
                         </div>
                       </div>
-                      <CategoryForm categories={draft.categories} onChange={(categories) => setDraft({ ...draft, categories })} ticketDefinitions={draft.ticketDefinitions} onTicketDefinitionsChange={(ticketDefinitions) => setDraft({ ...draft, ticketDefinitions })} compact />
+                      <CategoryForm categories={draft.categories} onChange={(categories) => setDraft((current) => current ? { ...current, categories } : current)} ticketDefinitions={draft.ticketDefinitions} onTicketDefinitionsChange={(ticketDefinitions) => setDraft((current) => current ? { ...current, ticketDefinitions } : current)} compact />
                       <div className="event-row-actions">
                         <button className="button" onClick={() => { setEditingId(null); setDraft(null); }}><X /> Cancel</button>
                         <button className="button button-primary" disabled={saving} onClick={() => void saveEditing()}><Save /> {saving ? "Saving…" : "Save changes"}</button>

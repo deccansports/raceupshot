@@ -76,19 +76,20 @@ export function feibotChipCodesByParticipant(providerRows: JsonRecord[]): Map<st
 
 export function buildParticipantExportRows(input: {
   registrationRows: JsonRecord[];
-  providerRows: JsonRecord[];
   states: Record<string, VolunteerParticipantState>;
   eventDate: string;
 }): ParticipantExportRow[] {
-  const chips = feibotChipCodesByParticipant(input.providerRows);
   return input.registrationRows.map((row) => {
     const id = rowIdentity(row);
     const bib = rowBib(row);
     const state = input.states[id] ?? input.states[bib];
     const dob = text(row, "dateOfBirth", "dob", "birthDate");
     const raceDate = text(row, "actualRaceDate", "raceDate") || input.eventDate;
-    const chip = chips.get(`id:${normalizedKey(id)}`) ?? chips.get(`bib:${normalizedKey(bib)}`) ?? "";
-    const waiverCheckedInAt = state?.checkedInAt ?? state?.waiverVerifiedAt ?? text(row, "checkedInAt", "waiverCheckedInAt", "waiverVerifiedAt");
+    const assignment = row.chipAssignment && typeof row.chipAssignment === "object" && !Array.isArray(row.chipAssignment)
+      ? row.chipAssignment as JsonRecord
+      : {};
+    const chip = text(assignment, "chipCode");
+    const waiverCheckedInAt = state ? state.checkedInAt ?? "" : text(row, "checkedInAt", "waiverCheckedInAt");
     const address = text(row, "address", "addressLine1", "streetAddress");
     const emergencyName = text(row, "emergencyContactName", "emergencyName");
     const emergencyMobile = text(row, "emergencyContact", "emergency_contact", "emergencyMobile", "emergencyPhone");
@@ -123,7 +124,7 @@ export function buildParticipantExportRows(input: {
       "Processing Fee": text(row, "processingFee", "processing_fee"),
       "Registered At": text(row, "registeredAt", "registrationDate", "createdAt", "rosterImportedAt"),
       "Actual Race Date": raceDate,
-      "Waiver Check-in Status": waiverCheckedInAt ? "Checked in" : text(row, "waiverStatus", "waiver_status") || "Not checked in",
+      "Waiver Check-in Status": waiverCheckedInAt ? "Checked in" : "Not checked in",
       "Waiver Checked-in At": waiverCheckedInAt,
       "Waiver Volunteer": text(row, "waiverVolunteer", "waiverVolunteerName", "checkedInBy") || (state?.checkedInAt ? state.updatedBy ?? "" : ""),
       "Waiver Counter": text(row, "waiverCounter", "waiverCounterName", "checkInCounter"),

@@ -3,6 +3,7 @@ import { mobileCorsHeaders, mobileCorsPreflight } from "@/lib/mobile-cors";
 import { requireVolunteer } from "@/lib/volunteer-auth";
 import { getEventBySlug } from "@/lib/raceupshot-repository";
 import { listVolunteerEventOptions, MANUAL_GUN_FINISH_ID, MANUAL_GUN_FINISH_NAME, normalizeVolunteerModules } from "@/lib/volunteer-management";
+import { listVolunteerCustomCounters } from "@/lib/volunteer-custom-counters";
 
 export const dynamic = "force-dynamic";
 export const OPTIONS = mobileCorsPreflight;
@@ -17,6 +18,8 @@ export async function GET(request: Request) {
       const current = eventOptionById.get(assignment.eventId);
       const automaticTiming = assignment.modules.includes("MANUAL_TIMING") && assignment.timingPointIds.length === 0;
       const finishPoint = current?.timingPoints.filter((point) => point.type === "FINISH").at(-1);
+      const customCounters = (await listVolunteerCustomCounters(assignment.eventId))
+        .filter((counter) => counter.active && (assignment.customCounterIds ?? []).includes(counter.id));
       return {
         ...assignment,
         modules: normalizeVolunteerModules(assignment.modules),
@@ -26,6 +29,8 @@ export async function GET(request: Request) {
         timingPointNames: automaticTiming ? [finishPoint?.name || MANUAL_GUN_FINISH_NAME] : assignment.timingPointNames,
         timingScope: automaticTiming ? "AUTO" : "RESTRICTED",
         manualGunFallback: automaticTiming && !finishPoint,
+        customCounterIds: assignment.customCounterIds ?? [],
+        customCounters,
         eventDate: event?.dateIso || null,
         eventLocation: event?.location || "",
         eventLogoUrl: event?.logoUrl || null,

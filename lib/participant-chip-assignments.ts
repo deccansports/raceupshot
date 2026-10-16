@@ -84,6 +84,15 @@ function athleteBandCode(row: JsonRecord): string {
   return String(row.athleteBandCode ?? row.athlete_band_code ?? row.athleteBand ?? row.bandCode ?? "").trim();
 }
 
+function relayChipGroupKey(row: JsonRecord): string {
+  const mode = String(row.participationMode ?? row.contestParticipationType ?? "").trim().toUpperCase();
+  if (mode !== "RELAY") return "";
+  const teamId = String(row.relayTeamId ?? "").trim();
+  if (teamId) return `team:${teamId}`;
+  const bib = String(row.bib ?? row.bibNumber ?? row.bib_number ?? row.raceNumber ?? "").trim();
+  return bib ? `fallback:${participantRegistrationScope(row)}:${bib.toLowerCase()}` : "";
+}
+
 function rows(payload: unknown): JsonRecord[] {
   if (Array.isArray(payload)) return payload.filter((item): item is JsonRecord => Boolean(item && typeof item === "object" && !Array.isArray(item)));
   if (!payload || typeof payload !== "object") return [];
@@ -207,9 +216,21 @@ export async function applyParticipantChipAssignments(kv: KVNamespace, eventId: 
   ]);
   const byParticipant = new Map(assignments.filter((item): item is ParticipantChipAssignmentAudit => Boolean(item)).map((item) => [item.participantId, item]));
   const bandByParticipant = new Map(bandAssignments.filter((item): item is ParticipantAthleteBandAssignmentAudit => Boolean(item)).map((item) => [item.participantId, item]));
+  const chipAssignmentByRelayTeam = new Map<string, ParticipantChipAssignmentAudit>();
+  for (const row of rosterRows) {
+    const teamKey = relayChipGroupKey(row);
+    if (!teamKey) continue;
+    const assignment = participantIdentityCandidates(row).map((id) => byParticipant.get(id)).find((item): item is ParticipantChipAssignmentAudit => Boolean(item));
+    const current = chipAssignmentByRelayTeam.get(teamKey);
+    if (assignment && (!current || assignment.changedAt >= current.changedAt)) chipAssignmentByRelayTeam.set(teamKey, assignment);
+  }
   return rosterRows.map((row) => {
     const identities = participantIdentityCandidates(row);
-    const assignment = identities.map((id) => byParticipant.get(id)).find((item): item is ParticipantChipAssignmentAudit => Boolean(item));
+    const directAssignment = identities.map((id) => byParticipant.get(id)).find((item): item is ParticipantChipAssignmentAudit => Boolean(item));
+    // Relay teams share one timing chip. Resolve the newest team action first
+    // so clearing the chip from any member also clears an older assignment
+    // recorded against another member.
+    const assignment = chipAssignmentByRelayTeam.get(relayChipGroupKey(row)) || directAssignment;
     const bandAssignment = identities.map((id) => bandByParticipant.get(id)).find((item): item is ParticipantAthleteBandAssignmentAudit => Boolean(item));
     return {
       ...row,
@@ -316,6 +337,47 @@ export async function replaceParticipantChip(input: {
   return { assignment, participant: updatedParticipant };
 }
 
+export async function removeParticipantChip(input: {
+  eventIdOrSlug: string;
+  participantId: string;
+  reason: string;
+  changedBy: string;
+}): Promise<{ assignment: ParticipantChipAssignmentAudit; participant: JsonRecord }> {
+  const event = await getEventBySlug(input.eventIdOrSlug, { includeUnpublished: true });
+  if (!event) throw new Error("Event not found.");
+  const kv = await getKv();
+  const editable = await editableParticipantRows(kv, event);
+  const selected = editable.rows.find((row) => participantIdentityCandidates(row).includes(input.participantId));
+  if (!selected) throw new Error("Participant is not available in this event-scoped roster.");
+  const previousChipCode = chipCode(selected);
+  if (!previousChipCode) throw new Error("This athlete does not have a timing chip assignment to remove.");
+  const [settings, manifest] = await Promise.all([getEventPlatformSettings(event.id), getCanonicalLiveManifest(event.id)]);
+  const providerEventUuid = settings?.timingIntegration?.providerEventUuid?.trim() || manifest?.providerEventUuid?.trim() || String(selected.providerEventUuid ?? selected.eventUuid ?? "").trim();
+  const changedAt = new Date().toISOString();
+  const assignment: ParticipantChipAssignmentAudit = {
+    id: crypto.randomUUID(), eventId: event.id, providerEventUuid, participantId: input.participantId,
+    bib: String(selected.bib ?? selected.bibNumber ?? "").trim(), participantName: String(selected.fullName ?? selected.name ?? "").trim(),
+    previousChipCode, chipCode: "", reason: input.reason.trim(), changedBy: input.changedBy, changedAt,
+  };
+  const [assignmentIds, auditIds] = await Promise.all([
+    kv.get<string[]>(assignmentIndexKey(event.id), "json").then((value) => value ?? []),
+    kv.get<string[]>(auditIndexKey(event.id), "json").then((value) => value ?? []),
+  ]);
+  await Promise.all([
+    kv.put(assignmentKey(event.id, input.participantId), JSON.stringify(assignment)),
+    kv.put(assignmentIndexKey(event.id), JSON.stringify([input.participantId, ...assignmentIds.filter((id) => id !== input.participantId)])),
+    kv.put(auditKey(event.id, assignment.id), JSON.stringify(assignment)),
+    kv.put(auditIndexKey(event.id), JSON.stringify([assignment.id, ...auditIds].slice(0, 2_000))),
+  ]);
+  // The audited KV assignment is authoritative. A stale or temporarily
+  // unavailable coordination object must not prevent an admin from clearing a
+  // chip. A later assignment for this participant also replaces any stale
+  // coordination claim atomically.
+  try { await releaseEquipmentCode(event.id, "chip", input.participantId); }
+  catch { /* Best-effort cleanup; the persisted empty assignment remains authoritative. */ }
+  return { assignment, participant: { ...selected, chipCode: "", chip_code: "", chipAssignment: assignment, lastUpdatedAt: changedAt } };
+}
+
 export async function replaceParticipantAthleteBand(input: {
   eventIdOrSlug: string;
   participantId: string;
@@ -385,7 +447,6 @@ export async function removeParticipantAthleteBand(input: {
   if (!selected) throw new Error("Participant is not available in this event-scoped roster.");
   const previousAthleteBandCode = athleteBandCode(selected);
   if (!previousAthleteBandCode) throw new Error("This athlete does not have a wristband assignment to remove.");
-  await releaseEquipmentCode(event.id, "athlete-band", input.participantId);
   const changedAt = new Date().toISOString();
   const assignment: ParticipantAthleteBandAssignmentAudit = {
     id: crypto.randomUUID(), eventId: event.id, participantId: input.participantId,
@@ -402,5 +463,7 @@ export async function removeParticipantAthleteBand(input: {
     kv.put(athleteBandAuditKey(event.id, assignment.id), JSON.stringify(assignment)),
     kv.put(athleteBandAuditIndexKey(event.id), JSON.stringify([assignment.id, ...auditIds].slice(0, 2_000))),
   ]);
+  try { await releaseEquipmentCode(event.id, "athlete-band", input.participantId); }
+  catch { /* Best-effort cleanup; the persisted empty assignment remains authoritative. */ }
   return { assignment, participant: { ...selected, athleteBandCode: "", athlete_band_code: "", athleteBandAssignment: assignment, lastUpdatedAt: changedAt } };
 }

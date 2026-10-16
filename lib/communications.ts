@@ -30,6 +30,11 @@ export const campaignInput = z.object({
   message: z.string().trim().min(3).max(500_000),
   contentType: z.enum(["TEXT", "HTML"]).default("TEXT"),
   variables: z.record(z.string().max(80), z.string().max(10_000)).default({}),
+  attachment: z.object({
+    filename: z.string().trim().min(1).max(180),
+    contentType: z.enum(["image/jpeg", "image/png", "image/webp", "application/pdf"]),
+    data: z.string().min(1).max(14_000_000),
+  }).optional(),
   filters: audienceFiltersInput,
 }).refine((value) => value.scope === "GLOBAL" || Boolean(value.eventId), {
   message: "Choose an event for event communications.",
@@ -60,6 +65,7 @@ export interface CampaignRecipient extends AudienceMember {
 export interface CommunicationCampaign extends CampaignInput {
   id: string;
   providerCampaignId?: string;
+  attachmentRef?: string;
   status: "SUBMITTING" | "QUEUED" | "PROCESSING" | "SES_ACCEPTED" | "COMPLETED" | "SENDING" | "SENT" | "PARTIAL_FAILURE" | "FAILED" | "EMPTY";
   createdAt: string;
   updatedAt: string;
@@ -338,6 +344,11 @@ export async function sendCommunicationBatch(id: string, batchSize = 200, retryF
   const providerCampaignId = campaign.providerCampaignId || `raceupshot-${campaign.id}`;
   const submission = await submitBergtecnoBulkCampaign({
     campaignId: providerCampaignId,
+    ...(campaign.attachmentRef
+      ? { attachmentRef: campaign.attachmentRef }
+      : campaign.attachment
+        ? { attachment: campaign.attachment }
+        : {}),
     messages: pending.map((recipient, index) => ({
       clientMessageId: recipient.clientMessageId || `${providerCampaignId}-${campaign.recipients.indexOf(recipient) || index + 1}-v1`,
       to: { email: recipient.email, name: recipient.name },
@@ -370,6 +381,10 @@ export async function sendCommunicationBatch(id: string, batchSize = 200, retryF
     };
   });
   campaign.providerCampaignId = providerCampaignId;
+  if (submission.attachmentRef) {
+    campaign.attachmentRef = submission.attachmentRef;
+    campaign.attachment = undefined;
+  }
   campaign.updatedAt = new Date().toISOString();
   const summarized = summarizeCommunicationCampaign(campaign);
   await kv.put(key, JSON.stringify(summarized));

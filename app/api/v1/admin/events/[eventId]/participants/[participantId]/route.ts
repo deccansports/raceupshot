@@ -6,7 +6,7 @@ import { deleteImportedParticipants, editImportedParticipant } from "@/lib/parti
 import { z } from "@/lib/zod";
 import { normalizeLiveRecord } from "@/lib/platform-repository";
 import { getEventBySlug } from "@/lib/raceupshot-repository";
-import { getAdminVolunteerParticipantStates, resetAdminVolunteerWaiverCheckIn, type VolunteerParticipantState } from "@/lib/volunteer-operations";
+import { getAdminVolunteerParticipantStates, registrationWaiverVerifiedAt, resetAdminVolunteerWaiverCheckIn, type VolunteerParticipantState } from "@/lib/volunteer-operations";
 import { notifyFinalizedRegistration } from "@/lib/registration-transactional-notifications";
 
 export const dynamic = "force-dynamic";
@@ -120,19 +120,28 @@ export async function GET(
       return id === participantId || bib === participantId;
     }) ?? null;
     if (!raw) return apiFailure("Participant not found in this event registration roster.", 404);
+    const assignedChipCode = text(raw.chipAssignment && typeof raw.chipAssignment === "object" && !Array.isArray(raw.chipAssignment)
+      ? raw.chipAssignment as JsonRecord
+      : null, "chipCode");
     const normalized = normalizeLiveRecord(raw, roster.event.id);
-    const participant = { ...normalized, raceStatus: "UNKNOWN" as const, resultStatus: undefined, splits: [], elapsedTime: undefined };
+    const participant = { ...normalized, raceStatus: "UNKNOWN" as const, resultStatus: undefined, splits: [], elapsedTime: undefined, timingSource: assignedChipCode ? "VOLUNTEER APP" : undefined };
     const stateParticipantId = text(raw, "participantUid", "participantUuid", "participant_uuid", "providerParticipantUuid", "uuid", "id")
       ?? participant.participantUid;
     const states = await getAdminVolunteerParticipantStates(eventId, [stateParticipantId])
       .catch((): Record<string, VolunteerParticipantState> => ({}));
     const state = states[stateParticipantId] ?? null;
+    const rosterWaiverVerifiedAt = registrationWaiverVerifiedAt(raw);
+    const operationalWaiverVerifiedAt = state?.waiverVerifiedAt && state.emailOtpVerifiedAt
+      ? state.waiverVerifiedAt
+      : null;
+    const waiverVerifiedAt = state?.waiverResetAt ? null : operationalWaiverVerifiedAt || rosterWaiverVerifiedAt;
+    const waiverDocumentKey = text(raw, "waiverDocumentKey");
     return apiSuccess({
       event: roster.event,
       participant,
       identity: {
         email: text(raw, "email", "emailAddress"),
-        chipCode: text(raw, "chipCode", "chip_code", "chip", "rfid"),
+        chipCode: assignedChipCode,
         providerEventUuid: text(raw, "providerEventUuid", "eventUuid"),
         providerParticipantUuid: text(raw, "providerParticipantUuid", "participantUuid"),
         contestUuid: text(raw, "contestUuid", "providerContestUuid"),
@@ -157,13 +166,14 @@ export async function GET(
         athleteBandCode: text(raw, "athleteBandCode", "athlete_band_code", "athleteBand", "bandCode"),
         idProofUrl: text(raw, "idProofUrl", "idProofURL", "id_proof_url", "idProof"),
         waiverDocumentUrl: text(raw, "waiverDocumentUrl", "signedWaiverUrl", "waiverPdfUrl", "waiver_url"),
+        waiverDocumentAvailable: Boolean(waiverVerifiedAt && waiverDocumentKey?.startsWith("signed-waivers/")),
         filledFormUrl: text(raw, "filledFormUrl", "registrationFormUrl", "formPdfUrl"),
         signatureName: text(raw, "signatureName", "signedBy", "waiverSignatureName"),
         invoiceNumber: text(raw, "invoiceNumber", "invoiceNo", "invoice_id"),
-        waiverStatus: text(raw, "waiverStatus", "waiver_status"),
-        checkedInAt: state?.checkedInAt ?? text(raw, "checkedInAt", "checkInTime"),
-        checkedInBy: state?.updatedBy ?? text(raw, "checkedInBy", "checkInHandledBy"),
-        waiverVerifiedAt: state?.waiverResetAt ? null : state ? state.waiverVerifiedAt : text(raw, "waiverVerifiedAt"),
+        waiverStatus: waiverVerifiedAt ? "OTP_VERIFIED" : "NOT_VERIFIED",
+        checkedInAt: state ? state.checkedInAt : text(raw, "checkedInAt", "checkInTime"),
+        checkedInBy: state ? (state.checkedInAt ? state.updatedBy : null) : text(raw, "checkedInBy", "checkInHandledBy"),
+        waiverVerifiedAt,
         rulesAccepted: truth(raw, "rulesAccepted", "rules_accepted"),
         cutoffAccepted: truth(raw, "cutoffAccepted", "cutoff_accepted"),
         cancellationPolicyAccepted: truth(raw, "cancellationPolicyAccepted", "deferralPolicyAccepted", "cancellation_policy_accepted"),

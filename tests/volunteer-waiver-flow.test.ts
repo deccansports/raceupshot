@@ -55,7 +55,15 @@ describe('volunteer waiver check-in', () => {
       waiverStatus: 'SIGNED',
       waiverSignedAt: '2026-10-09T11:00:00.000Z',
       waiverVerifiedAt: '2026-10-09T11:00:00.000Z',
+      waiverAuditId: 'audit-1',
+      waiverDocumentKey: 'signed-waivers/event/athlete/audit-1.pdf',
     })).toBe('2026-10-09T11:00:00.000Z');
+  });
+
+  it('does not accept a waiver status label without OTP verification evidence', () => {
+    expect(registrationWaiverVerifiedAt({ waiverStatus: 'VERIFIED' })).toBeNull();
+    expect(registrationWaiverVerifiedAt({ waiver_status: 'SIGNED' })).toBeNull();
+    expect(registrationWaiverVerifiedAt({ waiverVerifiedAt: 'VERIFIED' })).toBeNull();
   });
 
   it('blocks bike check-in until a required waiver is signed without changing waiver state', () => {
@@ -65,8 +73,14 @@ describe('volunteer waiver check-in', () => {
     expect(() => assertVolunteerBikeWaiverAvailable(unsigned, false, null)).not.toThrow();
   });
 
+  it('does not trust an operational waiver timestamp without its OTP timestamp', () => {
+    const incomplete = { waiverVerifiedAt: '2026-10-09T10:10:00.000Z', emailOtpVerifiedAt: null, waiverResetAt: null };
+    expect(effectiveVolunteerWaiverVerifiedAt(incomplete)).toBeNull();
+    expect(() => assertVolunteerBikeWaiverAvailable(incomplete, true)).toThrow('must sign and verify');
+  });
+
   it('accepts current waiver evidence but rejects evidence invalidated by a later reset', () => {
-    const active = { waiverVerifiedAt: '2026-10-09T10:10:00.000Z', waiverResetAt: null };
+    const active = { waiverVerifiedAt: '2026-10-09T10:10:00.000Z', emailOtpVerifiedAt: '2026-10-09T10:10:00.000Z', waiverResetAt: null };
     expect(() => assertVolunteerBikeWaiverAvailable(active, true)).not.toThrow();
     const reset = { waiverVerifiedAt: null, waiverResetAt: '2026-10-09T10:05:00.000Z' };
     expect(effectiveVolunteerWaiverVerifiedAt(reset, '2026-10-09T10:00:00.000Z')).toBeNull();

@@ -2,11 +2,10 @@ import { requireAdmin } from "@/lib/admin-guard";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { apiFailure, apiSuccess } from "@/lib/api-response";
 import { getAdminParticipantRoster, removeParticipantAssignmentOverlays } from "@/lib/participant-chip-assignments";
+import { registrationWaiverVerifiedAt } from "@/lib/volunteer-operations";
 import { deleteImportedParticipants } from "@/lib/participant-roster-import";
 import { getEventBySlug } from "@/lib/raceupshot-repository";
 import { getAdminParticipantVisibilityOverrides, normalizeLiveRecord } from "@/lib/platform-repository";
-import { getFeibotProviderParticipantRows } from "@/lib/feibot-integration";
-import { feibotChipCodesByParticipant } from "@/lib/participant-export";
 
 export const dynamic = "force-dynamic";
 
@@ -25,10 +24,6 @@ function source(row: JsonRecord): string {
   if (text(row, "publishedResultSource") === "PUBLISHED_RESULTS") return "Published results";
   if (text(row, "providerParticipantUuid", "providerEventUuid", "eventUuid")) return "Timing provider";
   return "Worker/KV";
-}
-
-function normalizedIdentity(value: string): string {
-  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
 function record(value: unknown): JsonRecord | null {
@@ -61,22 +56,14 @@ export async function GET(_request: Request, { params }: { params: Promise<{ eve
   if (denied) return denied;
   try {
     const { eventId } = await params;
-    const [roster, providerRows] = await Promise.all([
-      getAdminParticipantRoster(eventId, { includeUploadedFields: true }),
-      getFeibotProviderParticipantRows(eventId).catch(() => []),
-    ]);
+    const roster = await getAdminParticipantRoster(eventId, { includeUploadedFields: true });
     if (!roster) return apiFailure("Event not found.", 404);
     const overrides = await getAdminParticipantVisibilityOverrides(roster.event.id);
-    const providerChips = feibotChipCodesByParticipant(providerRows);
     const rosterRows = roster.rows.flatMap((raw) => {
       try {
-        const participant = { ...normalizeLiveRecord(raw, roster.event.id), raceStatus: "UNKNOWN" as const, resultStatus: undefined, splits: [], elapsedTime: undefined };
-        const rawId = text(raw, "participantUid", "participantUuid", "participant_uuid", "providerParticipantUuid", "uuid", "id");
         const explicitAssignment = record(raw.chipAssignment);
-        const chipCode = text(explicitAssignment ?? {}, "chipCode")
-          || providerChips.get(`id:${normalizedIdentity(rawId)}`)
-          || providerChips.get(`bib:${normalizedIdentity(participant.bib)}`)
-          || "";
+        const chipCode = text(explicitAssignment ?? {}, "chipCode");
+        const participant = { ...normalizeLiveRecord(raw, roster.event.id), raceStatus: "UNKNOWN" as const, resultStatus: undefined, splits: [], elapsedTime: undefined, timingSource: chipCode ? "VOLUNTEER APP" : undefined };
         return [{
           participant,
           override: overrides[participant.participantUid] ?? null,
@@ -109,8 +96,8 @@ export async function GET(_request: Request, { params }: { params: Promise<{ eve
           transactionId: text(raw, "transactionId", "transactionID", "paymentTransactionId"),
           deferred: text(raw, "deferred"), deferredFromPune: text(raw, "deferredFromPune", "deferred_from_pune"),
           cancellationReason: text(raw, "cancellationReason", "cancellation_reason"),
-          waiverStatus: text(raw, "waiverStatus", "waiver_status"),
-          waiverCheckedInAt: text(raw, "checkedInAt", "waiverCheckedInAt", "waiverVerifiedAt"),
+          waiverStatus: registrationWaiverVerifiedAt(raw) ? "OTP_VERIFIED" : "NOT_VERIFIED",
+          waiverCheckedInAt: text(raw, "checkedInAt", "waiverCheckedInAt"),
           waiverVolunteer: text(raw, "waiverVolunteer", "waiverVolunteerName", "checkedInBy"),
           waiverCounter: text(raw, "waiverCounter", "waiverCounterName", "checkInCounter"),
           bikeCheckIn: text(raw, "bikeCheckedInAt", "bikeCheckIn"), bikeCheckOut: text(raw, "bikeCheckedOutAt", "bikeCheckOut"),
@@ -146,14 +133,28 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ e
     const body = await request.json() as {
       confirmEventName?: string;
       confirmSelection?: string;
+      confirmTicketName?: string;
       expectedCount?: number;
       participantIds?: unknown;
+      ticketId?: string;
     };
     const roster = await getAdminParticipantRoster(event.id);
     if (!roster) return apiFailure("Event participant roster not found.", 404);
     const selectedParticipantIds = body.participantIds;
     let participantIds: string[];
-    if (Array.isArray(selectedParticipantIds)) {
+    if (typeof body.ticketId === "string" && body.ticketId.trim()) {
+      const ticketId = body.ticketId.trim();
+      const configuredTickets = event.ticketDefinitions?.length ? event.ticketDefinitions : event.tickets ?? [];
+      const ticket = configuredTickets.find((item) => item.id === ticketId || item.name === ticketId);
+      if (!ticket) return apiFailure("The selected event ticket no longer exists. Refresh before deleting participants.", 409);
+      if (body.confirmTicketName !== ticket.name || !Number.isSafeInteger(body.expectedCount) || (body.expectedCount ?? 0) < 1) {
+        return apiFailure("Type the exact ticket name and confirm the displayed participant count.", 400);
+      }
+      participantIds = roster.rows.filter((row) => text(row, "ticketId") === ticket.id
+        || (!text(row, "ticketId") && text(row, "ticketName", "contestName", "category") === ticket.name))
+        .map((row) => text(row, "participantUid", "participantUuid", "id"));
+      if (participantIds.length !== body.expectedCount) return apiFailure("The ticket roster changed. Refresh before confirming deletion.", 409);
+    } else if (Array.isArray(selectedParticipantIds)) {
       if (!selectedParticipantIds.every((value): value is string => typeof value === "string" && Boolean(value.trim()))) {
         return apiFailure("The selected participant list is invalid. Refresh and select the participants again.", 400);
       }

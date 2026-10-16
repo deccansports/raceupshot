@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronDown, ClipboardCheck, LayoutDashboard, LogIn, UserRound } from "lucide-react";
+import { ChevronDown, ClipboardCheck, LayoutDashboard, LogIn, LogOut, UserRound } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
 import { useEffect, useState } from "react";
@@ -43,6 +43,7 @@ export function AccountSwitcher() {
   const [profilesReady, setProfilesReady] = useState(false);
   const [profilePhoto, setProfilePhoto] = useState("");
   const [switching, setSwitching] = useState<"ATHLETE" | "VOLUNTEER" | null>(null);
+  const [loggingOut, setLoggingOut] = useState(false);
   const [switchError, setSwitchError] = useState("");
 
   useEffect(() => {
@@ -151,6 +152,26 @@ export function AccountSwitcher() {
     }
   }
 
+  async function logout() {
+    setLoggingOut(true);
+    setSwitchError("");
+    try {
+      window.localStorage.removeItem(VOLUNTEER_TOKEN_KEY);
+      await Promise.allSettled([
+        fetch("/api/auth/otp/session", { method: "DELETE", cache: "no-store" }),
+        fetch("/api/admin/session", { method: "DELETE", cache: "no-store" }),
+        import("@/lib/firebase-client").then(async ({ firebaseAuth }) => {
+          const { signOut } = await import("firebase/auth");
+          await signOut(firebaseAuth);
+        }),
+      ]);
+      window.location.assign("/login");
+    } catch (error) {
+      setSwitchError(error instanceof Error ? error.message : "Unable to log out.");
+      setLoggingOut(false);
+    }
+  }
+
   if (authReady && profilesReady && adminReady && !user && !isAdmin && !profiles.authenticated) {
     return (
       <details className="account-switcher">
@@ -183,6 +204,7 @@ export function AccountSwitcher() {
         {profiles.athlete && <Link href="/athlete" onClick={(event) => { event.preventDefault(); void changeProfile("ATHLETE", "/athlete"); }}><UserRound size={15} /><span><b>Athlete</b><small>{switching === "ATHLETE" ? "Opening…" : "Account and results"}</small></span></Link>}
         {profiles.volunteer && <Link href="/volunteer" onClick={(event) => { event.preventDefault(); void changeProfile("VOLUNTEER", "/volunteer"); }}><ClipboardCheck size={15} /><span><b>Volunteer</b><small>{switching === "VOLUNTEER" ? "Opening…" : "Authorized race operations"}</small></span></Link>}
         {isAdmin && <Link href="/admin"><LayoutDashboard size={15} /><span><b>Admin</b><small>Control centre</small></span></Link>}
+        <button className="account-switcher-logout" type="button" disabled={loggingOut} onClick={() => void logout()}><LogOut size={15} /><span><b>{loggingOut ? "Logging out…" : "Log out"}</b><small>Sign out of this device</small></span></button>
         {switchError && <p className="account-switcher-error" role="alert">{switchError}</p>}
       </div>
     </details>

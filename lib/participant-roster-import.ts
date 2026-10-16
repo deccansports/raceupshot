@@ -75,42 +75,131 @@ function aliasedValue(row: ParticipantRosterRow, aliases: string[]): string {
   return "";
 }
 
+function replaceAliasedValues(row: ParticipantRosterRow, replacements: Array<{ aliases: string[]; value: string }>): ParticipantRosterRow {
+  const next = { ...row };
+  for (const replacement of replacements) {
+    const aliases = new Set(replacement.aliases);
+    for (const key of Object.keys(next)) {
+      if (aliases.has(normalizedHeader(key))) next[key] = replacement.value;
+    }
+  }
+  return next;
+}
+
+function canonicalRelayRow(source: ParticipantRosterRow, canonical: ParticipantRosterRow): ParticipantRosterRow {
+  // Insert canonical columns first for review while retaining every original
+  // spreadsheet column after them. Reapply canonical values so source columns
+  // with the same name cannot overwrite the selected team member.
+  return { ...canonical, ...source, ...canonical };
+}
+
 /** Convert one-team-per-row relay spreadsheets into the canonical one-athlete-per-row import shape. */
 export function expandRelayTeamUploadRows(rows: ParticipantRosterRow[]): ParticipantRosterRow[] {
   return rows.flatMap((row) => {
-    const hasWideMembers = Object.keys(row).some((key) => /^athlete [123] (name|full name|email|email address|role)$/.test(normalizedHeader(key)));
-    if (!hasWideMembers) return [row];
+    const normalizedKeys = Object.keys(row).map(normalizedHeader);
+    const hasParticipantMembers = normalizedKeys.some((key) => /^participant [123]( (name|full name|email|email address|contact|contact number|mobile|mobile number|phone|gender|dob|date of birth|birth date|t shirt|t shirt size|tshirt|tshirt size|category|role|relay leg))?$/.test(key)
+      || /^participant (name|full name|email|email address|contact|contact number|mobile|mobile number|phone|gender|dob|date of birth|birth date|t shirt|t shirt size|tshirt|tshirt size|category|role|relay leg) [123]$/.test(key));
+    const hasAthleteMembers = normalizedKeys.some((key) => /^athlete [123] (name|full name|email|email address|contact|contact number|mobile|mobile number|phone|gender|dob|date of birth|birth date|t shirt|t shirt size|tshirt|tshirt size|category|role|relay leg)$/.test(key));
+    if (!hasParticipantMembers && !hasAthleteMembers) return [row];
     const bib = aliasedValue(row, ["team bib number", "team bib", "bib number", "bib"]);
-    const teamName = aliasedValue(row, ["team name", "relay team name"]);
-    const contest = aliasedValue(row, ["contest name", "contest", "category", "ticket name"]);
+    const teamName = aliasedValue(row, ["group name", "relay team name", "team name"]);
+    const contest = aliasedValue(row, ["race category", "contest name", "contest", "category", "ticket name"]);
     const contestType = aliasedValue(row, ["contest type", "participant format"]);
-    const members = [1, 2, 3].flatMap((memberNumber) => {
-      const name = aliasedValue(row, [`athlete ${memberNumber} name`, `athlete ${memberNumber} full name`]);
-      const email = aliasedValue(row, [`athlete ${memberNumber} email`, `athlete ${memberNumber} email address`]);
-      const role = aliasedValue(row, [`athlete ${memberNumber} role`, `athlete ${memberNumber} relay leg`]);
+    const memberRow = (prefix: string, sourceNumber: number, memberNumber: number): ParticipantRosterRow[] => {
+      const name = aliasedValue(row, [`${prefix} ${sourceNumber}`, `${prefix} ${sourceNumber} name`, `${prefix} ${sourceNumber} full name`]);
+      const email = aliasedValue(row, [`${prefix} ${sourceNumber} email`, `${prefix} ${sourceNumber} email address`, `${prefix} email ${sourceNumber}`, `${prefix} email address ${sourceNumber}`]);
+      const mobile = aliasedValue(row, [`${prefix} ${sourceNumber} contact`, `${prefix} ${sourceNumber} contact number`, `${prefix} ${sourceNumber} mobile`, `${prefix} ${sourceNumber} mobile number`, `${prefix} ${sourceNumber} phone`, `${prefix} contact ${sourceNumber}`, `${prefix} contact number ${sourceNumber}`, `${prefix} mobile ${sourceNumber}`, `${prefix} mobile number ${sourceNumber}`, `${prefix} phone ${sourceNumber}`]);
+      const gender = aliasedValue(row, [`${prefix} ${sourceNumber} gender`, `${prefix} gender ${sourceNumber}`]);
+      const dateOfBirth = aliasedValue(row, [`${prefix} ${sourceNumber} dob`, `${prefix} ${sourceNumber} date of birth`, `${prefix} ${sourceNumber} birth date`, `${prefix} dob ${sourceNumber}`, `${prefix} date of birth ${sourceNumber}`, `${prefix} birth date ${sourceNumber}`]);
+      const tshirtSize = aliasedValue(row, [`${prefix} ${sourceNumber} t shirt`, `${prefix} ${sourceNumber} t shirt size`, `${prefix} ${sourceNumber} tshirt`, `${prefix} ${sourceNumber} tshirt size`, `${prefix} t shirt ${sourceNumber}`, `${prefix} t shirt size ${sourceNumber}`, `${prefix} tshirt ${sourceNumber}`, `${prefix} tshirt size ${sourceNumber}`]);
+      const role = aliasedValue(row, [`${prefix} ${sourceNumber} category`, `${prefix} ${sourceNumber} role`, `${prefix} ${sourceNumber} relay leg`, `${prefix} category ${sourceNumber}`, `${prefix} role ${sourceNumber}`, `${prefix} relay leg ${sourceNumber}`]);
       if (!name && !email) return [];
-      return [{
-        ...row,
+      const memberSource = replaceAliasedValues(row, [
+        { aliases: ["name", "full name", "athlete name"], value: name },
+        { aliases: ["name on bib", "bib name"], value: "" },
+        { aliases: ["registration number", "registration id", "registration uid"], value: "" },
+        { aliases: ["email", "email address", "e mail"], value: email },
+        { aliases: ["mobile number", "mobile", "phone", "contact number"], value: mobile },
+        { aliases: ["gender", "sex"], value: gender },
+        { aliases: ["birth date", "date of birth", "dob"], value: dateOfBirth },
+        { aliases: ["age", "athlete age", "age category", "age group"], value: "" },
+        { aliases: ["t shirt", "t shirt size", "tshirt", "tshirt size"], value: tshirtSize },
+        { aliases: ["blood group", "blood type", "medical history", "medical notes", "medical condition", "medical conditions"], value: "" },
+        { aliases: ["emergency contact name", "emergency name", "emergency contact number", "emergency contact", "emergency number"], value: "" },
+      ]);
+      return [canonicalRelayRow(memberSource, {
         "BIB Number": bib,
         "Athlete Name": name,
+        "Name on BIB": "",
+        "Registration ID": "",
         "Email": email,
+        "Mobile": mobile,
+        "Gender": gender,
+        "Date of Birth": dateOfBirth,
+        "Age": "",
+        "Age Group": "",
+        "T-Shirt Size": tshirtSize,
+        "Blood Group": "",
+        "Medical History": "",
+        "Medical Condition": "",
+        "Emergency Contact Name": "",
+        "Emergency Contact Number": "",
         "Category / Contest": contest,
         "Contest Type": contestType,
         "Relay Team Name": teamName,
         "Relay Member Number": memberNumber,
         "Relay Member Role": role,
-      }];
-    });
+      })];
+    };
+    const participantMembers = hasParticipantMembers
+      ? [1, 2, 3].flatMap((sourceNumber) => memberRow("participant", sourceNumber, sourceNumber + 1))
+      : [];
+    const captainName = aliasedValue(row, ["name", "athlete name", "full name"]);
+    const captainEmail = aliasedValue(row, ["email", "email address", "e mail"]);
+    const participantRoles = participantMembers.map((member) => text(member["Relay Member Role"]).toLowerCase());
+    const standardRelayRoles = ["swim", "cycling", "run"];
+    const inferredCaptainRole = standardRelayRoles.find((role) => !participantRoles.some((value) => value === role || value.startsWith(`${role.slice(0, 3)}`))) || "";
+    const captain = hasParticipantMembers && (captainName || captainEmail) ? [canonicalRelayRow(row, {
+      "BIB Number": bib,
+      "Athlete Name": captainName,
+      "Name on BIB": aliasedValue(row, ["name on bib", "bib name"]),
+      "Registration ID": aliasedValue(row, ["registration number", "registration id", "registration uid"]),
+      "Email": captainEmail,
+      "Mobile": aliasedValue(row, ["mobile number", "mobile", "phone", "contact number"]),
+      "Gender": aliasedValue(row, ["gender", "sex"]),
+      "Date of Birth": aliasedValue(row, ["birth date", "date of birth", "dob"]),
+      "Age": aliasedValue(row, ["age"]),
+      "Age Group": aliasedValue(row, ["age category", "age group"]),
+      "T-Shirt Size": aliasedValue(row, ["t shirt", "t shirt size", "tshirt", "tshirt size"]),
+      "Blood Group": aliasedValue(row, ["blood group", "blood type"]),
+      "Medical History": aliasedValue(row, ["medical history", "medical notes"]),
+      "Medical Condition": aliasedValue(row, ["medical condition", "medical conditions"]),
+      "Emergency Contact Name": aliasedValue(row, ["emergency contact name", "emergency name"]),
+      "Emergency Contact Number": aliasedValue(row, ["emergency contact number", "emergency contact", "emergency number"]),
+      "Registration Status": aliasedValue(row, ["registration status", "booking status", "status"]),
+      "Category / Contest": contest,
+      "Contest Type": contestType,
+      "Relay Team Name": teamName,
+      "Relay Member Number": 1,
+      "Relay Member Role": inferredCaptainRole,
+    })] : [];
+    const members = hasParticipantMembers
+      ? [...captain, ...participantMembers]
+      : [1, 2, 3].flatMap((memberNumber) => memberRow("athlete", memberNumber, memberNumber));
     return members.length ? members : [row];
   });
 }
 
 export function suggestParticipantTicket(source: string, tickets: string[]): string {
   if (tickets.length === 1) return tickets[0];
-  const normalized = source.trim().toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const normalizeTicket = (value: string) => value.trim().toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const normalized = normalizeTicket(source);
   if (!normalized) return "";
-  const matches = tickets.filter((ticket) => ticket.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim() === normalized);
-  return matches.length === 1 ? matches[0] : "";
+  const exact = tickets.filter((ticket) => normalizeTicket(ticket) === normalized);
+  if (exact.length === 1) return exact[0];
+  const relayComparable = (value: string) => normalizeTicket(value).split(" ").filter((token) => token !== "team").join(" ");
+  const relayMatches = tickets.filter((ticket) => relayComparable(ticket) === relayComparable(source));
+  return relayMatches.length === 1 ? relayMatches[0] : "";
 }
 
 function text(value: unknown): string {
@@ -207,10 +296,20 @@ function uploadedFields(row: ParticipantRosterRow | undefined): Record<string, s
   if (!row) return {};
   return Object.fromEntries(Object.entries(row).slice(0, 300).flatMap(([header, value]) => {
     const key = header.trim().slice(0, 160);
-    if (!key) return [];
+    if (!key || ["chip", "chip code", "chipcode", "timing chip", "timing chip code", "rfid"].includes(normalizedHeader(key))) return [];
     const serialized = value === null || value === undefined ? "" : String(value).slice(0, 5_000);
     return [[key, serialized]];
   }));
+}
+
+function withoutRegistrationChip(row: ParticipantRosterRow): ParticipantRosterRow {
+  const safe = { ...row };
+  delete safe.chipCode;
+  delete safe.chip_code;
+  delete safe.chip;
+  delete safe.rfid;
+  delete safe.chipAssignment;
+  return safe;
 }
 
 function uploadedMappings(value: unknown): Record<string, string> {
@@ -226,7 +325,7 @@ function priorRegistrationFields(row: ParticipantRosterRow | null | undefined): 
   if (!row) return {};
   const allowed = [
     "email", "mobile", "registrationId", "registration_id", "profileParticipantId", "personParticipantId", "participantId", "eventId", "eventEditionId", "raceCategoryId", "sessionId", "sessionName", "scheduledStartAt", "registrationStatus", "contestName", "category", "sourceCategory", "ticketId", "ticketName", "ticketStatus",
-    "gender", "ageGroup", "chipCode", "chip_code", "athleteBandCode", "athlete_band_code",
+    "gender", "ageGroup", "athleteBandCode", "athlete_band_code",
     "emergencyContact", "emergencyContactName", "address", "city", "state", "country", "pincode",
     "dateOfBirth", "dob", "age", "bloodGroup", "tshirtSize", "nameOnBib", "medicalHistory", "medicalCondition", "idProofUrl", "identityProof", "waiverStatus", "waiverVerifiedAt", "waiverSignedAt",
     "belSeason", "belRecognition", "bookingId", "ticketPrice", "amountPaid", "balanceAmount", "taxAmount", "processingFee",
@@ -461,7 +560,7 @@ export function mergeImportedParticipantRows(
 ): ParticipantRosterRow[] {
   if (!importedRows.length) return providerRows;
   const merged = providerRows.map((row) => ({ ...row }));
-  for (const privateImported of importedRows) {
+  for (const privateImported of importedRows.map(withoutRegistrationChip)) {
     // Keep medical disclosures in the authenticated import record, never in the live feed.
     const imported = publicRosterRow(privateImported);
     const importedId = participantId(imported).toLowerCase();
@@ -472,8 +571,9 @@ export function mergeImportedParticipantRows(
     );
     if (index >= 0) {
       const providerId = participantId(merged[index]);
+      const preserveProviderIdentity = text(merged[index].rosterImportSource) !== "ADMIN_UPLOAD";
       merged[index] = publicRosterRow(mergeDefined(merged[index], imported));
-      if (providerId) {
+      if (providerId && preserveProviderIdentity) {
         merged[index].participantUid = providerId;
         merged[index].participantUuid = providerId;
       }
@@ -490,12 +590,12 @@ export async function applyParticipantRosterImport(
   providerRows: ParticipantRosterRow[],
 ): Promise<ParticipantRosterRow[]> {
   const payload = await kv.get<ParticipantRosterImportPayload>(rosterImportKey(eventId), "json");
-  return payload?.rows?.length ? mergeImportedParticipantRows(providerRows, payload.rows) : providerRows;
+  return payload?.rows?.length ? mergeImportedParticipantRows(providerRows, payload.rows.map(withoutRegistrationChip)) : providerRows;
 }
 
 export async function getPrivateImportedParticipantRows(kv: KVNamespace, eventId: string): Promise<ParticipantRosterRow[]> {
   const payload = await kv.get<ParticipantRosterImportPayload>(rosterImportKey(eventId), "json");
-  return payload?.rows?.map((row) => ({ ...row })) ?? [];
+  return payload?.rows?.map(withoutRegistrationChip) ?? [];
 }
 
 // Registration uploads may enrich a Feibot athlete, but they are never a
@@ -600,17 +700,36 @@ export async function importParticipantRoster(input: {
   replaceExisting: boolean;
   importedBy: string;
 }): Promise<ParticipantRosterImportSummary> {
-  const storedFeed = unpack(await input.kv.get<unknown>(`${PREFIX}:live:event:${input.eventId}:participants`, "json"));
+  const eventTickets = (input.eventTickets ?? []).map((ticket) => typeof ticket === "string"
+    ? { id: ticket, name: ticket, participationMode: "INDIVIDUAL" as const, relayTeamSize: null }
+    : ticket);
+  const replacementTicketIds = new Set(input.rows.flatMap((source) => {
+    const sourceCategory = rowValue(source, input.mappings.category);
+    const mappedTicketId = input.categoryMappings?.[sourceCategory]
+      ?? suggestParticipantTicket(sourceCategory, eventTickets.map((ticket) => ticket.name));
+    return mappedTicketId ? [mappedTicketId.toLowerCase()] : [];
+  }));
+  const replacementSourceCategories = new Set(input.rows.flatMap((source) => {
+    const sourceCategory = rowValue(source, input.mappings.category).toLowerCase();
+    return sourceCategory ? [sourceCategory] : [];
+  }));
+  const scopedReplacement = replacementTicketIds.size > 0 || replacementSourceCategories.size > 0;
+  const replacesUploadedRow = (row: ParticipantRosterRow) => !scopedReplacement
+    || replacementTicketIds.has(text(row.ticketId).toLowerCase())
+    || replacementSourceCategories.has(text(row.sourceCategory ?? row.contestName ?? row.category).toLowerCase());
+  const storedFeed = unpack(await input.kv.get<unknown>(`${PREFIX}:live:event:${input.eventId}:participants`, "json"))
+    .map((row) => text(row.rosterImportSource) === "ADMIN_UPLOAD" ? withoutRegistrationChip(row) : row);
   const previous = await input.kv.get<ParticipantRosterImportPayload>(rosterImportKey(input.eventId), "json");
-  const previousRows: ParticipantRosterRow[] = previous?.rows ?? [];
+  const previousRows: ParticipantRosterRow[] = (previous?.rows ?? []).map(withoutRegistrationChip);
   const previousByBib = new Map(previousRows.flatMap((row) => {
     const value = bib(row).toLowerCase();
     return value ? [[value, row] as const] : [];
   }));
   const currentFeed = input.replaceExisting ? storedFeed.flatMap((row) => {
+    if (!replacesUploadedRow(row)) return [row];
     const prior = previousByBib.get(bib(row).toLowerCase());
     if (!prior) return [row];
-    if (participantId(row).startsWith(`import:${input.eventId}:`)) return [];
+    if (text(row.rosterImportSource) === "ADMIN_UPLOAD" || participantId(row).startsWith(`import:${input.eventId}:`)) return [];
     const cleaned = { ...row };
     if (text(cleaned.chipCode).toLowerCase() === text(prior.chipCode).toLowerCase()) {
       delete cleaned.chipCode; delete cleaned.chip_code;
@@ -625,14 +744,22 @@ export async function importParticipantRoster(input: {
   const currentRows = input.replaceExisting
     ? currentFeed
     : mergeImportedParticipantRows(currentFeed, previousRows);
-  const retainedPreviousRows: ParticipantRosterRow[] = input.replaceExisting ? [] : previousRows;
+  const retainedPreviousRows: ParticipantRosterRow[] = input.replaceExisting
+    ? previousRows.filter((row) => !replacesUploadedRow(row))
+    : previousRows;
   let importedRows: ParticipantRosterRow[] = [...retainedPreviousRows];
   let created = 0;
   let updated = 0;
   const uploadTeamCounts = new Map<string, number>();
-  const eventTickets = (input.eventTickets ?? []).map((ticket) => typeof ticket === "string"
-    ? { id: ticket, name: ticket, participationMode: "INDIVIDUAL" as const, relayTeamSize: null }
-    : ticket);
+  const inferredRelayTeamSize = (source: ParticipantRosterRow, nextBib: string, sourceCategory: string): 2 | 3 | null => {
+    const matchingRows = input.rows.filter((candidate) => rowValue(candidate, input.mappings.bib).toLowerCase() === nextBib.toLowerCase()
+      && rowValue(candidate, input.mappings.category) === sourceCategory);
+    const explicitNumbers = matchingRows.map((candidate) => Number(rowValue(candidate, input.mappings.relayMemberNumber)))
+      .filter((value) => Number.isInteger(value) && value > 0);
+    const inferred = Math.max(matchingRows.length, ...explicitNumbers, 0);
+    const hasRelayEvidence = Boolean(rowValue(source, input.mappings.relayTeamName) || explicitNumbers.length);
+    return hasRelayEvidence && (inferred === 2 || inferred === 3) ? inferred : null;
+  };
 
   input.rows.forEach((source, index) => {
     const rowNumber = index + 2;
@@ -640,8 +767,9 @@ export async function importParticipantRoster(input: {
     const name = rowValue(source, input.mappings.name);
     if (!nextBib) throw new Error(`Row ${rowNumber}: BIB is required.`);
     const key = nextBib.toLowerCase();
-    const chipCode = normalizedCode(rowValue(source, input.mappings.chipCode), "Chip Code");
     const athleteBandCode = normalizedCode(rowValue(source, input.mappings.athleteBandCode), "Athlete Band Code");
+    const retainedUploadedFields = uploadedFields(source);
+    if (input.mappings.chipCode) delete retainedUploadedFields[input.mappings.chipCode];
     const sourceCategory = rowValue(source, input.mappings.category);
     const mappedTicketId = input.categoryMappings?.[sourceCategory] ?? suggestParticipantTicket(sourceCategory, eventTickets.map((ticket) => ticket.name));
     if (eventTickets.length && !mappedTicketId) {
@@ -653,8 +781,9 @@ export async function importParticipantRoster(input: {
     if (mappedTicketId && eventTickets.length && !mappedTicket) {
       throw new Error(`Row ${rowNumber}: mapped ticket “${mappedTicketId}” is not configured for this event.`);
     }
-    const mode = mappedTicket?.participationMode === "RELAY" ? "RELAY" : "INDIVIDUAL";
-    const relayTeamSize = mode === "RELAY" ? mappedTicket?.relayTeamSize : null;
+    const uploadedRelayTeamSize = inferredRelayTeamSize(source, nextBib, sourceCategory);
+    const mode = mappedTicket?.participationMode === "RELAY" || uploadedRelayTeamSize ? "RELAY" : "INDIVIDUAL";
+    const relayTeamSize = mode === "RELAY" ? mappedTicket?.relayTeamSize ?? uploadedRelayTeamSize : null;
     if (mode === "RELAY" && relayTeamSize !== 2 && relayTeamSize !== 3) {
       throw new Error(`Row ${rowNumber}: relay ticket ${mappedTicket?.name || sourceCategory} must be configured for 2 or 3 athletes.`);
     }
@@ -677,7 +806,7 @@ export async function importParticipantRoster(input: {
     uploadTeamCounts.set(teamKey, (uploadTeamCounts.get(teamKey) ?? 0) + 1);
     const explicitProfileId = rowValue(source, input.mappings.participantId);
     const explicitRegistrationId = rowValue(source, input.mappings.registrationId);
-    const matchingRows = [...importedRows, ...currentRows].filter((row) => bib(row).toLowerCase() === key && text(row.ticketId) === text(mappedTicket?.id));
+    const matchingRows = [...importedRows, ...currentRows, ...previousRows].filter((row) => bib(row).toLowerCase() === key && text(row.ticketId) === text(mappedTicket?.id));
     const existing = explicitRegistrationId
       ? matchingRows.find((row) => participantRegistrationId(row) === explicitRegistrationId)
       : explicitProfileId
@@ -686,12 +815,18 @@ export async function importParticipantRoster(input: {
         ? matchingRows.find((row) => Number(row.relayMemberNumber) === relayMemberNumber)
         : matchingRows[0];
     const registeredPrevious = existing && text(existing.publishedResultSource) !== "PUBLISHED_RESULTS" ? existing : null;
+    const identityChanged = Boolean(registeredPrevious) && (
+      text(registeredPrevious?.name ?? registeredPrevious?.fullName) !== name
+      || text(registeredPrevious?.email).toLowerCase() !== email.toLowerCase()
+    );
     const repeatedProfile = Boolean(explicitProfileId) && input.rows.filter((candidate) => rowValue(candidate, input.mappings.participantId) === explicitProfileId).length > 1;
     const profileAlreadyUsed = Boolean(explicitProfileId) && [...importedRows, ...currentRows].some((candidate) => participantProfileId(candidate) === explicitProfileId);
-    const id = explicitRegistrationId || (registeredPrevious ? participantRegistrationId(registeredPrevious) : "") || (explicitProfileId && !repeatedProfile && !profileAlreadyUsed ? explicitProfileId : "") || (mode === "RELAY"
+    const id = explicitRegistrationId || (!identityChanged && registeredPrevious ? participantRegistrationId(registeredPrevious) : "") || (explicitProfileId && !repeatedProfile && !profileAlreadyUsed ? explicitProfileId : "") || (identityChanged
+      ? `registration:${crypto.randomUUID()}`
+      : mode === "RELAY"
       ? `import:${input.eventId}:${encodeURIComponent(nextBib)}:member-${relayMemberNumber}`
       : `import:${input.eventId}:${encodeURIComponent(nextBib)}`);
-    const personId = explicitProfileId || (registeredPrevious ? participantProfileId(registeredPrevious) : "") || `participant:${crypto.randomUUID()}`;
+    const personId = explicitProfileId || (!identityChanged && registeredPrevious ? participantProfileId(registeredPrevious) : "") || `participant:${crypto.randomUUID()}`;
     const sessionId = rowValue(source, input.mappings.sessionId) || mappedTicket?.sessionId || "";
     const relayTeamId = mode === "RELAY" ? `relay:${input.eventId}:${mappedTicket?.id || encodeURIComponent(sourceCategory)}:${encodeURIComponent(nextBib)}` : "";
     const imported: ParticipantRosterRow = mergeDefined(priorRegistrationFields(registeredPrevious), {
@@ -740,19 +875,13 @@ export async function importParticipantRoster(input: {
       relayMemberRole: mode === "RELAY" ? rowValue(source, input.mappings.relayMemberRole) : "",
       gender: rowValue(source, input.mappings.gender),
       ageGroup: rowValue(source, input.mappings.ageGroup),
-      chipCode,
-      chip_code: chipCode,
       athleteBandCode,
       athlete_band_code: athleteBandCode,
-      uploadedFields: uploadedFields(source),
-      uploadedFieldMappings: Object.fromEntries(Object.entries(input.mappings).flatMap(([field, header]) => header ? [[field, header]] : [])),
+      uploadedFields: retainedUploadedFields,
+      uploadedFieldMappings: Object.fromEntries(Object.entries(input.mappings).flatMap(([field, header]) => field !== "chipCode" && header ? [[field, header]] : [])),
       rosterImportSource: "ADMIN_UPLOAD",
       rosterImportedAt: new Date().toISOString(),
     });
-    const identityChanged = Boolean(registeredPrevious) && (
-      text(registeredPrevious?.name ?? registeredPrevious?.fullName) !== name
-      || text(registeredPrevious?.email).toLowerCase() !== email.toLowerCase()
-    );
     if (identityChanged) Object.assign(imported, {
       waiverStatus: null,
       waiverVerifiedAt: null,
@@ -779,7 +908,6 @@ export async function importParticipantRoster(input: {
 
   const mergedRows = mergeImportedParticipantRows(currentFeed, importedRows);
   validateBibSharing(importedRows);
-  validateUnique(mergedRows, "chipCode", "Chip Code");
   validateUnique(mergedRows, "athleteBandCode", "Athlete Band Code");
 
   const importedAt = new Date().toISOString();
@@ -791,18 +919,20 @@ export async function importParticipantRoster(input: {
     importedAt,
     importedBy: input.importedBy,
   };
-  await Promise.all([
+  const writes: Promise<void>[] = [
     input.kv.put(rosterImportKey(input.eventId), JSON.stringify(payload)),
     input.kv.put(`${PREFIX}:live:event:${input.eventId}:participants`, JSON.stringify({ participants: mergedRows })),
     input.kv.put(`${PREFIX}:live:event:${input.eventId}:updated`, importedAt),
-  ]);
+  ];
+  if (previous) writes.push(input.kv.put(`${rosterImportKey(input.eventId)}:backup`, JSON.stringify(previous)));
+  await Promise.all(writes);
 
   return {
     eventId: input.eventId,
     imported: input.rows.length,
     created,
     updated,
-    chipCodesAssigned: importedRows.filter((row) => text(row.chipCode)).length,
+    chipCodesAssigned: 0,
     athleteBandsAssigned: importedRows.filter((row) => text(row.athleteBandCode)).length,
     fileName: input.fileName,
   };

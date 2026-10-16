@@ -1,7 +1,13 @@
+import { selectBikeParticipants, selectTeamChipParticipants } from "./relay-bike";
+
 export interface CounterParticipant {
   id: string;
   chipCode: string;
   registrationWaiverVerifiedAt: string | null;
+  bib?: string;
+  participationMode?: "INDIVIDUAL" | "RELAY";
+  relayTeamId?: string | null;
+  relayMemberRole?: string | null;
 }
 
 export interface CounterState {
@@ -24,16 +30,27 @@ export function calculateVolunteerOperationCounters<T extends CounterParticipant
       || states[participant.id]?.checkedInAt,
   );
   const waiverCompletedAthletes = participants.filter(hasCompletedWaiver).length;
-  const waivedBikeEntries = participants.filter((participant) =>
+  const bikeParticipants = selectBikeParticipants(participants);
+  const waivedBikeEntries = bikeParticipants.filter((participant) =>
     Boolean(hasCompletedWaiver(participant) && states[participant.id]?.bikeCheckedInAt)).length;
-  const bikesEverCheckedIn = participants.filter((participant) => Boolean(states[participant.id]?.bikeCheckedInAt)).length;
-  const bikesCheckedIn = participants.filter((participant) => Boolean(states[participant.id]?.bikeCheckedInAt && !states[participant.id]?.bikeCheckedOutAt)).length;
-  const bikesCheckedOut = participants.filter((participant) => Boolean(states[participant.id]?.bikeCheckedOutAt)).length;
-  const chipsAssigned = participants.filter((participant) => Boolean(participant.chipCode)).length;
+  const bikeTeamsWithCompletedWaiver = bikeParticipants.filter(hasCompletedWaiver).length;
+  const bikesEverCheckedIn = bikeParticipants.filter((participant) => Boolean(states[participant.id]?.bikeCheckedInAt)).length;
+  const bikesCheckedIn = bikeParticipants.filter((participant) => Boolean(states[participant.id]?.bikeCheckedInAt && !states[participant.id]?.bikeCheckedOutAt)).length;
+  const bikesCheckedOut = bikeParticipants.filter((participant) => Boolean(states[participant.id]?.bikeCheckedOutAt)).length;
+  const chipParticipants = selectTeamChipParticipants(participants);
+  const hasTeamBikeEntry = (participant: T) => {
+    const groupKey = participant.participationMode === "RELAY" ? (participant.relayTeamId || `bib:${participant.bib || ""}`) : null;
+    return participants.some((member) => {
+      if (!groupKey) return member.id === participant.id && Boolean(states[member.id]?.bikeCheckedInAt);
+      const memberGroupKey = member.participationMode === "RELAY" ? (member.relayTeamId || `bib:${member.bib || ""}`) : null;
+      return memberGroupKey === groupKey && Boolean(states[member.id]?.bikeCheckedInAt);
+    });
+  };
+  const chipsAssigned = chipParticipants.filter((participant) => Boolean(participant.chipCode)).length;
   // Timing-chip assignment remains valid after bike checkout. The chip desk
   // therefore uses every recorded bike entry, not only bikes still onsite.
-  const chipsAssignedToBikeEntries = participants.filter((participant) =>
-    Boolean(participant.chipCode && states[participant.id]?.bikeCheckedInAt)).length;
+  const chipsAssignedToBikeEntries = chipParticipants.filter((participant) =>
+    Boolean(participant.chipCode && hasTeamBikeEntry(participant))).length;
   return {
     totalAthletes,
     checkedInAthletes,
@@ -42,10 +59,11 @@ export function calculateVolunteerOperationCounters<T extends CounterParticipant
     bikesEverCheckedIn,
     bikesCheckedIn,
     bikesCheckedOut,
-    remainingToBikeCheckIn: Math.max(0, waiverCompletedAthletes - waivedBikeEntries),
+    remainingToBikeCheckIn: Math.max(0, bikeTeamsWithCompletedWaiver - waivedBikeEntries),
     remainingToBikeCheckOut: bikesCheckedIn,
+    chipAssignmentTargets: chipParticipants.length,
     chipsAssigned,
-    remainingToAssign: Math.max(0, totalAthletes - chipsAssigned),
+    remainingToAssign: Math.max(0, chipParticipants.length - chipsAssigned),
     chipsAssignedToBikeEntries,
     remainingToAssignFromBikeEntries: Math.max(0, bikesEverCheckedIn - chipsAssignedToBikeEntries),
   };

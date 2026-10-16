@@ -2,7 +2,7 @@
 
 import type { CommunicationCampaign } from "@/lib/communications";
 import type { RaceEvent } from "@/lib/types";
-import { Filter, MailCheck, Megaphone, RefreshCw, Send } from "lucide-react";
+import { Filter, History, MailCheck, Megaphone, Paperclip, RefreshCw, Send } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
 interface AudiencePreview {
@@ -16,6 +16,14 @@ interface Props {
   initialEventId?: string;
 }
 
+interface EmailAttachment {
+  filename: string;
+  contentType: string;
+  data: string;
+}
+
+const EMAIL_TOKENS = ["{{name}}", "{{event_name}}", "{{event_date}}", "{{event_location}}", "{{event_type}}"];
+
 export function CommunicationsManager({ events, initialCampaigns, initialEventId = "" }: Props) {
   const [scope, setScope] = useState<"GLOBAL" | "EVENT">(initialEventId ? "EVENT" : "GLOBAL");
   const [eventId, setEventId] = useState(initialEventId);
@@ -24,6 +32,8 @@ export function CommunicationsManager({ events, initialCampaigns, initialEventId
   const [working, setWorking] = useState(false);
   const [testWorking, setTestWorking] = useState(false);
   const [notice, setNotice] = useState("");
+  const [view, setView] = useState<"COMPOSE" | "HISTORY">("COMPOSE");
+  const [attachment, setAttachment] = useState<EmailAttachment | undefined>();
   const selectedEvent = useMemo(() => events.find((event) => event.id === eventId), [eventId, events]);
   const activeCampaignIds = useMemo(() => campaigns
     .filter((campaign) => campaign.providerCampaignId && ["QUEUED", "PROCESSING", "SES_ACCEPTED"].includes(campaign.status))
@@ -70,6 +80,7 @@ export function CommunicationsManager({ events, initialCampaigns, initialEventId
       message: String(values.get("message") || ""),
       contentType: String(values.get("contentType") || "TEXT") as "TEXT" | "HTML",
       variables: parseVariables(values.get("variables")),
+      attachment,
       filters: {
         country: String(values.get("country") || ""),
         state: String(values.get("state") || ""),
@@ -118,6 +129,7 @@ export function CommunicationsManager({ events, initialCampaigns, initialEventId
           contentType: body.contentType,
           eventId: body.eventId,
           variables: body.variables,
+          attachment: body.attachment,
         }),
       });
       const payload = await response.json() as { ok?: boolean; data?: { recipientEmail?: string }; error?: string };
@@ -128,6 +140,40 @@ export function CommunicationsManager({ events, initialCampaigns, initialEventId
     } finally {
       setTestWorking(false);
     }
+  }
+
+  async function selectAttachment(file?: File) {
+    if (!file) {
+      setAttachment(undefined);
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      setNotice("Email attachments must be 10 MB or smaller.");
+      setAttachment(undefined);
+      return;
+    }
+    if (!["image/jpeg", "image/png", "image/webp", "application/pdf"].includes(file.type)) {
+      setNotice("Choose a JPG, PNG, WebP or PDF attachment.");
+      setAttachment(undefined);
+      return;
+    }
+    const data = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || "").split(",").pop() || "");
+      reader.onerror = () => reject(new Error("Unable to read the attachment."));
+      reader.readAsDataURL(file);
+    });
+    setAttachment({ filename: file.name, contentType: file.type, data });
+    setNotice(`${file.name} will be attached to the campaign and test email.`);
+  }
+
+  function insertToken(token: string) {
+    const field = document.querySelector<HTMLTextAreaElement>('textarea[name="message"]');
+    if (!field) return;
+    const start = field.selectionStart;
+    field.setRangeText(token, start, field.selectionEnd, "end");
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+    field.focus();
   }
 
   async function previewAudience(form: HTMLFormElement) {
@@ -233,6 +279,11 @@ export function CommunicationsManager({ events, initialCampaigns, initialEventId
 
   return (
     <div className="communications-stack">
+      <div className="communication-scope">
+        <button type="button" className={view === "COMPOSE" ? "active" : ""} onClick={() => setView("COMPOSE")}><Megaphone /> New broadcast</button>
+        <button type="button" className={view === "HISTORY" ? "active" : ""} onClick={() => setView("HISTORY")}><History /> Campaign history</button>
+      </div>
+      {view === "COMPOSE" && (
       <form className="admin-card communication-compose" onSubmit={(event) => void createAndSend(event)} onChange={() => setPreview(null)}>
         <div className="admin-card-head">
           <div><h2><Megaphone /> Compose communication</h2><p>Filter the database, preview the audience, then send through Bergtecno.</p></div>
@@ -259,8 +310,13 @@ export function CommunicationsManager({ events, initialCampaigns, initialEventId
           <div className="field"><label>Audience</label><div className="audience-readout">{preview ? `${preview.count.toLocaleString()} recipients` : "Preview required"}</div></div>
           <div className="field full"><label>Email subject</label><input name="subject" required defaultValue={selectedEvent ? `${selectedEvent.name} update` : "Race Upshot news"} placeholder="Race Upshot news" /></div>
           <div className="field"><label>Email format</label><select name="contentType" defaultValue="TEXT"><option value="TEXT">Styled text email</option><option value="HTML">HTML email</option></select></div>
-          <div className="field full"><label>Message / HTML</label><textarea name="message" required placeholder="Write the email message or paste HTML. Use {{name}} in HTML for the recipient name." /></div>
+          <div className="field full"><label>Message / HTML</label><textarea name="message" required placeholder="Write the email message or paste HTML. Use {{name}} in HTML for the recipient name." /><div className="communication-token-row">{EMAIL_TOKENS.map((token) => <button key={token} type="button" onClick={() => insertToken(token)}>+ {token}</button>)}</div></div>
           <div className="field full"><label>HTML variables</label><textarea name="variables" placeholder={"instagram_handle=@raceupshot\nimg1080x1080=https://…\nimg1080x1920=https://…\ncollab_email=info@raceupshot.com"} /><small>Optional · one key=value per line. Event ID, name, date, location and type are filled automatically for one-event communications.</small></div>
+          <div className="field full">
+            <label><Paperclip /> Attachment</label>
+            <input type="file" accept="image/jpeg,image/png,image/webp,application/pdf" onChange={(event) => void selectAttachment(event.target.files?.[0])} />
+            <small>{attachment ? `${attachment.filename} selected` : "Optional JPG, PNG, WebP or PDF · maximum 10 MB."}</small>
+          </div>
           <div className="field full communication-test">
             <label>Test email</label>
             <div>
@@ -283,7 +339,9 @@ export function CommunicationsManager({ events, initialCampaigns, initialEventId
           <button className="button button-primary" disabled={working || testWorking || !preview?.count}><Send /> {working ? "Working…" : "Create & send"}</button>
         </div>
       </form>
+      )}
 
+      {view === "HISTORY" && (
       <section className="admin-card">
         <div className="admin-card-head"><h2><MailCheck /> Communication history</h2><span className="status-pill">{campaigns.length} total</span></div>
         {!campaigns.length ? <p className="admin-empty">No communications have been created yet.</p> : (
@@ -305,6 +363,7 @@ export function CommunicationsManager({ events, initialCampaigns, initialEventId
           </div>
         )}
       </section>
+      )}
     </div>
   );
 }

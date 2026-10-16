@@ -11,6 +11,8 @@ const inputSchema = z.object({
   timingPointId: z.string().trim().min(1).max(160).optional(),
   capturedAt: z.string().datetime({ offset: true }).optional(),
   gunStartAt: z.string().datetime({ offset: true }).optional(),
+  deviceTimeZone: z.string().trim().max(100).optional(),
+  replaceExisting: z.boolean().optional(),
 });
 
 export const dynamic = "force-dynamic";

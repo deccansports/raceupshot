@@ -1,5 +1,4 @@
 import { requireAdmin } from "@/lib/admin-guard";
-import { getFeibotProviderParticipantRows } from "@/lib/feibot-integration";
 import { buildParticipantExportRows, participantExportCsv } from "@/lib/participant-export";
 import { getAdminParticipantRoster } from "@/lib/participant-chip-assignments";
 import { getEventBySlug } from "@/lib/raceupshot-repository";
@@ -26,10 +25,9 @@ export async function GET(_request: Request, { params }: { params: Promise<{ eve
   if (denied) return denied;
   try {
     const { eventId } = await params;
-    const [event, roster, providerRows] = await Promise.all([
+    const [event, roster] = await Promise.all([
       getEventBySlug(eventId, { includeUnpublished: true }),
       getAdminParticipantRoster(eventId),
-      getFeibotProviderParticipantRows(eventId).catch(() => []),
     ]);
     if (!event || !roster) return new Response("Event not found.", { status: 404 });
     const participantIds = roster.rows.map((row) =>
@@ -40,7 +38,6 @@ export async function GET(_request: Request, { params }: { params: Promise<{ eve
       .catch((): Record<string, VolunteerParticipantState> => ({}));
     const rows = buildParticipantExportRows({
       registrationRows: roster.rows,
-      providerRows,
       states,
       eventDate: event.dateIso,
     });

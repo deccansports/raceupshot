@@ -37,6 +37,28 @@ describe("participant chip assignment overrides", () => {
     expect(result[1]).toMatchObject({ chipCode: "KEEP-2" });
   });
 
+  it("projects one relay timing-chip assignment onto every athlete in the same team", async () => {
+    const eventId = "event-relay-team-chip";
+    const assignment = {
+      id: "relay-chip-audit", eventId, providerEventUuid: "", participantId: "relay-member-1", bib: "1501",
+      participantName: "Swimmer", previousChipCode: "", chipCode: "TEAM-1501", reason: "Volunteer counter assignment",
+      changedBy: "Timing Volunteer", changedAt: "2026-10-15T18:00:00.000Z",
+    };
+    const result = await applyParticipantChipAssignments(fakeKv({
+      [`raceupshot:live:event:${eventId}:chip-assignment:index`]: ["relay-member-1"],
+      [`raceupshot:live:event:${eventId}:chip-assignment:relay-member-1`]: assignment,
+    }), eventId, [
+      { participantUid: "relay-member-1", bib: "1501", participationMode: "RELAY", relayTeamId: "team-a", relayMemberNumber: 1 },
+      { participantUid: "relay-member-2", bib: "1501", participationMode: "RELAY", relayTeamId: "team-a", relayMemberNumber: 2 },
+      { participantUid: "relay-member-3", bib: "1501", participationMode: "RELAY", relayTeamId: "team-a", relayMemberNumber: 3 },
+      { participantUid: "other-relay-member", bib: "1502", participationMode: "RELAY", relayTeamId: "team-b", relayMemberNumber: 1 },
+    ]);
+
+    expect(result.slice(0, 3).map((row) => row.chipCode)).toEqual(["TEAM-1501", "TEAM-1501", "TEAM-1501"]);
+    expect(result.slice(0, 3).every((row) => row.chipAssignment === assignment)).toBe(true);
+    expect(result[3]).not.toHaveProperty("chipCode");
+  });
+
   it("leaves provider rows unchanged when the event has no overrides", async () => {
     const rows = [{ participantUid: "participant-1", chipCode: "ORIGINAL" }];
     expect(await applyParticipantChipAssignments(fakeKv({}), "event-b", rows)).toBe(rows);
@@ -55,6 +77,43 @@ describe("participant chip assignment overrides", () => {
     expect(result).toMatchObject({ athleteBandCode: "", athlete_band_code: "", athleteBandAssignment: removal });
   });
 
+  it("applies an audited timing chip removal overlay", async () => {
+    const eventId = "event-chip-removal";
+    const removal = {
+      id: "audit-chip-remove", eventId, providerEventUuid: "", participantId: "athlete-2", bib: "6001", participantName: "Relay Athlete",
+      previousChipCode: "10020", chipCode: "", reason: "Chip returned", changedBy: "admin", changedAt: "2026-10-15T00:00:00.000Z",
+    };
+    const [result] = await applyParticipantChipAssignments(fakeKv({
+      [`raceupshot:live:event:${eventId}:chip-assignment:index`]: ["athlete-2"],
+      [`raceupshot:live:event:${eventId}:chip-assignment:athlete-2`]: removal,
+    }), eventId, [{ participantUid: "athlete-2", bib: "6001", chipCode: "10020" }]);
+    expect(result).toMatchObject({ chipCode: "", chip_code: "", chipAssignment: removal });
+  });
+
+  it("clears a shared relay chip for every team member when any member removes it", async () => {
+    const eventId = "event-relay-chip-removal";
+    const assignment = {
+      id: "audit-relay-assign", eventId, providerEventUuid: "", participantId: "relay-member-1", bib: "6001", participantName: "Relay Captain",
+      previousChipCode: "", chipCode: "CHIP-6001", reason: "Assigned", changedBy: "admin", changedAt: "2026-10-15T10:00:00.000Z",
+    };
+    const removal = {
+      id: "audit-relay-remove", eventId, providerEventUuid: "", participantId: "relay-member-2", bib: "6001", participantName: "Relay Runner",
+      previousChipCode: "CHIP-6001", chipCode: "", reason: "Removed", changedBy: "admin", changedAt: "2026-10-15T10:05:00.000Z",
+    };
+    const result = await applyParticipantChipAssignments(fakeKv({
+      [`raceupshot:live:event:${eventId}:chip-assignment:index`]: ["relay-member-1", "relay-member-2"],
+      [`raceupshot:live:event:${eventId}:chip-assignment:relay-member-1`]: assignment,
+      [`raceupshot:live:event:${eventId}:chip-assignment:relay-member-2`]: removal,
+    }), eventId, [
+      { participantUid: "relay-member-1", bib: "6001", participationMode: "RELAY", relayTeamId: "team-6001" },
+      { participantUid: "relay-member-2", bib: "6001", participationMode: "RELAY", relayTeamId: "team-6001" },
+      { participantUid: "relay-member-3", bib: "6001", participationMode: "RELAY", relayTeamId: "team-6001" },
+    ]);
+
+    expect(result.map((row) => row.chipCode)).toEqual(["", "", ""]);
+    expect(result.every((row) => row.chipAssignment === removal)).toBe(true);
+  });
+
   it("seeds volunteer operations from the separate participant roster when no live-feed rows are supplied", async () => {
     const eventId = "event-participant-file";
     const imported = { participantUid: "participant-1001", bib: "1001", name: "Viraj Mahajan", rosterImportSource: "ADMIN_UPLOAD" };
@@ -70,6 +129,19 @@ describe("participant chip assignment overrides", () => {
     }), eventId, []);
 
     expect(result).toEqual([imported]);
+  });
+
+  it("keeps the private uploaded roster separate from Feibot live participant rows", async () => {
+    const eventId = "event-separated-rosters";
+    const imported = { participantUid: "imported-1001", bib: "1001", name: "Uploaded Athlete", rosterImportSource: "ADMIN_UPLOAD" };
+    const feibot = { participantUid: "feibot-1001", bib: "1001", name: "Feibot Athlete", chipCode: "FEIBOT-99", providerParticipantUuid: "feibot-1001" };
+    const result = await applyParticipantChipAssignments(fakeKv({
+      [`raceupshot:live:event:${eventId}:participant-roster-import`]: { schemaVersion: 1, eventId, fileName: "participants.xlsx", rows: [imported] },
+      [`raceupshot:live:event:${eventId}:participants`]: { participants: [feibot] },
+    }), eventId, [], true);
+
+    expect(result).toEqual([imported]);
+    expect(result).not.toContainEqual(expect.objectContaining({ providerParticipantUuid: "feibot-1001" }));
   });
 
   it("does not fetch stale assignments for athletes outside the selected roster", async () => {

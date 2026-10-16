@@ -12,4 +12,23 @@ describe("participant spreadsheet mapping", () => {
       emergencyContactName: "Emergency Contact Name", emergencyContact: "Emergency Contact Number",
     });
   });
+
+  it("prefers canonical expanded relay columns over the captain source columns", () => {
+    const mappings = suggestedMappings([
+      "BIB Number", "Name", "Race Category", "Mobile Number", "Birth Date", "T-Shirt",
+      "Athlete Name", "Mobile", "Date of Birth", "T-Shirt Size", "Category / Contest",
+      "Relay Team Name", "Relay Member Number", "Relay Member Role",
+    ]);
+    expect(mappings).toMatchObject({
+      bib: "BIB Number",
+      name: "Athlete Name",
+      mobile: "Mobile",
+      dateOfBirth: "Date of Birth",
+      tshirtSize: "T-Shirt Size",
+      category: "Category / Contest",
+      relayTeamName: "Relay Team Name",
+      relayMemberNumber: "Relay Member Number",
+      relayMemberRole: "Relay Member Role",
+    });
+  });
 });

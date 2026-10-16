@@ -25,7 +25,7 @@ describe("participant roster imports", () => {
       mappings: { bib: "BIB Number", name: "Name", nameOnBib: "Name on bib", category: "CONTEST", age: "Age", tshirtSize: "T-Shirt", medicalHistory: "Medical History", medicalCondition: "Medical Condition" },
       categoryMappings: { "SPRINT TRIATHLON": "sprint" },
       eventTickets: [{ id: "sprint", name: "Sprint Triathlon" }],
-      replaceExisting: false, importedBy: "admin",
+      replaceExisting: true, importedBy: "admin",
     });
     const stored = values.get(`raceupshot:live:event:${eventId}:participant-roster-import`) as { rows: Array<Record<string, unknown>> };
     const feed = values.get(`raceupshot:live:event:${eventId}:participants`) as { participants: Array<Record<string, unknown>> };
@@ -76,6 +76,27 @@ describe("participant roster imports", () => {
     });
   });
 
+  it("creates a new registration identity when a reused BIB belongs to a different athlete", async () => {
+    const eventId = "reused-bib-event";
+    const { kv, values } = memoryKv();
+    const common = {
+      kv, eventId, fileName: "participants.csv", mappings: { bib: "Bib", name: "Name", email: "Email" },
+      replaceExisting: false, importedBy: "admin",
+    };
+    await importParticipantRoster({ ...common, rows: [{ Bib: "1003", Name: "Aman Singh", Email: "aman@example.com" }] });
+    const first = values.get(`raceupshot:live:event:${eventId}:participant-roster-import`) as { rows: Array<Record<string, unknown>> };
+    const firstId = String(first.rows[0].participantUid);
+
+    await importParticipantRoster({ ...common, rows: [{ Bib: "1003", Name: "Himanshi Goel", Email: "himanshi@example.com" }] });
+    const second = values.get(`raceupshot:live:event:${eventId}:participant-roster-import`) as { rows: Array<Record<string, unknown>> };
+    const feed = values.get(`raceupshot:live:event:${eventId}:participants`) as { participants: Array<Record<string, unknown>> };
+    expect(second.rows).toHaveLength(1);
+    expect(second.rows[0]).toMatchObject({ bib: "1003", name: "Himanshi Goel", waiverStatus: null });
+    expect(second.rows[0].participantUid).not.toBe(firstId);
+    expect(feed.participants).toHaveLength(1);
+    expect(feed.participants[0].participantUid).toBe(second.rows[0].participantUid);
+  });
+
   it("enriches a Feibot athlete without replacing provider identity or chip code", () => {
     const [merged] = mergeRegistrationDataIntoProviderParticipants(
       [{ participantUid: "feibot-1", providerParticipantUuid: "feibot-1", bib: "1001", chipCode: "FEIBOT-99", fullName: "Provider Name", contestName: "TRIATHLON" }],
@@ -115,6 +136,7 @@ describe("participant roster imports", () => {
   });
   it("suggests only an unambiguous event ticket", () => {
     expect(suggestParticipantTicket("Bergman 102 Triathlon", ["BERGMAN 102 TRIATHLON", "BERGMAN OLYMPIC TRIATHLON"])).toBe("BERGMAN 102 TRIATHLON");
+    expect(suggestParticipantTicket("Triathlon 113 - Team Relay", ["Triathlon 113 Relay", "Sprint Triathlon"])).toBe("Triathlon 113 Relay");
     expect(suggestParticipantTicket("Swimathon", ["SWIMATHON 1 KM", "SWIMATHON 2 KM"])).toBe("");
   });
 
@@ -181,7 +203,7 @@ describe("participant roster imports", () => {
     expect(saved.rows[0]).not.toHaveProperty("status");
   });
 
-  it("links chip and athlete band to the existing provider participant by event BIB", async () => {
+  it("keeps the provider chip isolated from registration import while linking the athlete band by event BIB", async () => {
     const eventId = "event-a";
     const feedKey = `raceupshot:live:event:${eventId}:participants`;
     const { kv, values } = memoryKv({
@@ -198,12 +220,12 @@ describe("participant roster imports", () => {
       importedBy: "admin@raceupshot.com",
     });
 
-    expect(summary).toMatchObject({ imported: 1, created: 0, updated: 1, chipCodesAssigned: 1, athleteBandsAssigned: 1 });
+    expect(summary).toMatchObject({ imported: 1, created: 0, updated: 1, chipCodesAssigned: 0, athleteBandsAssigned: 1 });
     expect((values.get(feedKey) as { participants: Array<Record<string, unknown>> }).participants[0]).toMatchObject({
       participantUid: "provider-1510",
       bib: "1510",
       name: "Wahid Pathan",
-      chipCode: "10960",
+      chipCode: "OLD",
       athleteBandCode: "BMA1510",
     });
   });
@@ -221,7 +243,8 @@ describe("participant roster imports", () => {
       },
     });
     const refreshed = await applyParticipantRosterImport(kv, eventId, [{ participantUid: "new-provider-id", bib: "42", name: "Athlete" }]);
-    expect(refreshed[0]).toMatchObject({ participantUid: "new-provider-id", bib: "42", chipCode: "CHIP42", athleteBandCode: "BAND42" });
+    expect(refreshed[0]).toMatchObject({ participantUid: "new-provider-id", bib: "42", athleteBandCode: "BAND42" });
+    expect(refreshed[0]).not.toHaveProperty("chipCode");
   });
 
   it("keeps imported athletes that are not yet present in the timing-provider roster", () => {
@@ -291,6 +314,33 @@ describe("participant roster imports", () => {
     expect(saved.rows.map((row) => row.athleteBandCode)).toEqual(["BAND-1001", "BAND-1002", "BAND-1003"]);
   });
 
+  it("infers a relay from uploaded team fields when the mapped ticket is incorrectly marked individual", async () => {
+    const eventId = "relay-inferred-event";
+    const { kv, values } = memoryKv();
+    await importParticipantRoster({
+      kv,
+      eventId,
+      fileName: "relay.xlsx",
+      rows: [
+        { BIB: "6001", Name: "Captain", Email: "captain@example.com", Category: "Relay", Team: "JUNGLEBULLS", Member: "1", Shirt: "L" },
+        { BIB: "6001", Name: "Runner", Email: "runner@example.com", Category: "Relay", Team: "JUNGLEBULLS", Member: "2", Shirt: "M" },
+        { BIB: "6001", Name: "Cyclist", Email: "cyclist@example.com", Category: "Relay", Team: "JUNGLEBULLS", Member: "3", Shirt: "S" },
+      ],
+      mappings: { bib: "BIB", name: "Name", email: "Email", category: "Category", relayTeamName: "Team", relayMemberNumber: "Member", tshirtSize: "Shirt" },
+      categoryMappings: { Relay: "relay-ticket" },
+      eventTickets: [{ id: "relay-ticket", name: "Triathlon 113 Relay", participationMode: "INDIVIDUAL", relayTeamSize: null }],
+      replaceExisting: false,
+      importedBy: "admin",
+    });
+    const saved = values.get(`raceupshot:live:event:${eventId}:participant-roster-import`) as { rows: Array<Record<string, unknown>> };
+    expect(saved.rows).toHaveLength(3);
+    expect(saved.rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ bib: "6001", participationMode: "RELAY", relayTeamSize: 3, relayTeamName: "JUNGLEBULLS", tshirtSize: "L" }),
+      expect.objectContaining({ bib: "6001", participationMode: "RELAY", relayTeamSize: 3, relayTeamName: "JUNGLEBULLS", tshirtSize: "M" }),
+      expect.objectContaining({ bib: "6001", participationMode: "RELAY", relayTeamSize: 3, relayTeamName: "JUNGLEBULLS", tshirtSize: "S" }),
+    ]));
+  });
+
   it("rejects an incomplete relay team", async () => {
     const { kv } = memoryKv();
     await expect(importParticipantRoster({
@@ -320,6 +370,31 @@ describe("participant roster imports", () => {
       { "BIB Number": "1501", "Athlete Name": "Amit", Email: "amit@example.com", "Relay Team Name": "Team A", "Relay Member Number": 2 },
       { "BIB Number": "1501", "Athlete Name": "Rohit", Email: "rohit@example.com", "Relay Team Name": "Team A", "Relay Member Number": 3 },
     ]);
+  });
+
+  it("expands a relay captain and numbered participants with their full details", () => {
+    expect(expandRelayTeamUploadRows([{
+      "BIB Number": "6001", "Team Name": "Team 1", "Group Name": "JUNGLEBULLS", "Name on bib": "SUNILKUMAR MUNIREDDY",
+      "Registration Number": "UT11326-000549", "Race Category": "Triathlon 113 - Team Relay", Name: "Sunilkumar Munireddy",
+      Gender: "Male", Email: "sunilkumar.ym13@gmail.com", "Mobile Number": "919590526336", "Birth Date": "1993-05-13",
+      Age: "34", "Age Category": "N/A", "T-Shirt": "L", "Blood Group": "O+", "Medical History": "NA",
+      "Emergency Contact Name": "Raju", "Emergency Contact Number": "919686868047", "Registration Status": "REGISTRATION CONFIRMED",
+      "Participant 1": "ANANDAKUMAR B", "Participant Email 1": "bala.anand.k@gmail.com", "Participant Contact 1": "663866118",
+      "Participant Gender 1": "Male", "Participant DOB 1": "18/5/1985", "Participant T-shirt 1": "L", "Participant Category 1": "Run",
+      "Participant 2": "MUBEEN", "Participant Email 2": "mubyjin4@gmail.com", "Participant Contact 2": "8110032326",
+      "Participant Gender 2": "Male", "Participant DOB 2": "1991-04-03T18:30:00.000Z", "Participant T-shirt 2": "M", "Participant Category 2": "Cycling",
+    }])).toMatchObject([
+      { "BIB Number": "6001", "Athlete Name": "Sunilkumar Munireddy", Email: "sunilkumar.ym13@gmail.com", Mobile: "919590526336", Gender: "Male", "Date of Birth": "1993-05-13", "T-Shirt Size": "L", "Relay Team Name": "JUNGLEBULLS", "Relay Member Number": 1, "Relay Member Role": "swim" },
+      { "BIB Number": "6001", "Athlete Name": "ANANDAKUMAR B", Email: "bala.anand.k@gmail.com", Mobile: "663866118", Gender: "Male", "Date of Birth": "18/5/1985", "T-Shirt Size": "L", "Relay Team Name": "JUNGLEBULLS", "Relay Member Number": 2, "Relay Member Role": "Run" },
+      { "BIB Number": "6001", "Athlete Name": "MUBEEN", Email: "mubyjin4@gmail.com", Mobile: "8110032326", Gender: "Male", "Date of Birth": "1991-04-03T18:30:00.000Z", "T-Shirt Size": "M", "Relay Team Name": "JUNGLEBULLS", "Relay Member Number": 3, "Relay Member Role": "Cycling" },
+    ]);
+    const expanded = expandRelayTeamUploadRows([{
+      "BIB Number": "6001", Name: "Captain", "Name on bib": "CAPTAIN", "Registration Number": "REG-1", Email: "captain@example.com", "Mobile Number": "111", Age: "40",
+      "Participant 1": "Runner", "Participant Email 1": "runner@example.com", "Participant Contact 1": "222", "Participant Category 1": "Run",
+      "Participant 2": "Cyclist", "Participant Email 2": "cyclist@example.com", "Participant Contact 2": "333", "Participant Category 2": "Cycling",
+    }]);
+    expect(expanded[1]).toMatchObject({ Name: "Runner", "Name on bib": "", "Registration Number": "", Email: "runner@example.com", "Mobile Number": "222", Age: "", "Athlete Name": "Runner" });
+    expect(expanded[2]).toMatchObject({ Name: "Cyclist", "Name on bib": "", "Registration Number": "", Email: "cyclist@example.com", "Mobile Number": "333", Age: "", "Athlete Name": "Cyclist" });
   });
 
   it("invalidates only the edited athlete waiver when their identity changes", async () => {
@@ -356,8 +431,40 @@ describe("participant roster imports", () => {
     });
     const saved = (values.get(feedKey) as { participants: Array<Record<string, unknown>> }).participants;
     expect(saved.find((row) => row.bib === "1")).toMatchObject({ participantUid: "provider-1", bib: "1" });
-    expect(saved.find((row) => row.bib === "1")).not.toHaveProperty("chipCode");
+    expect(saved.find((row) => row.bib === "1")).toMatchObject({ chipCode: "OLD-1" });
     expect(saved.some((row) => row.bib === "2")).toBe(false);
-    expect(saved.find((row) => row.bib === "3")).toMatchObject({ chipCode: "NEW-3", athleteBandCode: "BAND-3" });
+    expect(saved.find((row) => row.bib === "3")).toMatchObject({ athleteBandCode: "BAND-3" });
+    expect(saved.find((row) => row.bib === "3")).not.toHaveProperty("chipCode");
+  });
+
+  it("limits a replacement upload to its mapped ticket and snapshots the prior roster", async () => {
+    const eventId = "ticket-scoped-replacement";
+    const feedKey = `raceupshot:live:event:${eventId}:participants`;
+    const importKey = `raceupshot:live:event:${eventId}:participant-roster-import`;
+    const individual = { participantUid: "individual-2001", bib: "2001", name: "Individual Athlete", ticketId: "olympic", ticketName: "Olympic Triathlon", sourceCategory: "Olympic Triathlon", rosterImportSource: "ADMIN_UPLOAD" };
+    const oldRelay = { participantUid: "old-relay-6001", bib: "6001", name: "Old Relay Athlete", ticketId: "relay", ticketName: "Triathlon 113 Relay", sourceCategory: "Triathlon 113 - Team Relay", rosterImportSource: "ADMIN_UPLOAD" };
+    const previous = { schemaVersion: 1, eventId, fileName: "all-participants.xlsx", rows: [individual, oldRelay], importedAt: "2026-10-14T00:00:00.000Z", importedBy: "admin" };
+    const { kv, values } = memoryKv({ [feedKey]: { participants: [individual, oldRelay] }, [importKey]: previous });
+
+    await importParticipantRoster({
+      kv,
+      eventId,
+      fileName: "relay-only.xlsx",
+      rows: [1, 2, 3].map((member) => ({ BIB: "6002", Name: `Relay ${member}`, Email: `relay${member}@example.com`, Category: "Triathlon 113 - Team Relay", Team: "Team Two", Member: String(member) })),
+      mappings: { bib: "BIB", name: "Name", email: "Email", category: "Category", relayTeamName: "Team", relayMemberNumber: "Member" },
+      categoryMappings: { "Triathlon 113 - Team Relay": "relay" },
+      eventTickets: [
+        { id: "olympic", name: "Olympic Triathlon", participationMode: "INDIVIDUAL" },
+        { id: "relay", name: "Triathlon 113 Relay", participationMode: "RELAY", relayTeamSize: 3 },
+      ],
+      replaceExisting: true,
+      importedBy: "admin",
+    });
+
+    const saved = values.get(importKey) as { rows: Array<Record<string, unknown>> };
+    expect(saved.rows).toHaveLength(4);
+    expect(saved.rows).toContainEqual(expect.objectContaining({ participantUid: "individual-2001", bib: "2001" }));
+    expect(saved.rows.some((row) => row.participantUid === "old-relay-6001")).toBe(false);
+    expect((values.get(`${importKey}:backup`) as { fileName: string; rows: unknown[] })).toMatchObject({ fileName: "all-participants.xlsx", rows: [individual, oldRelay] });
   });
 });

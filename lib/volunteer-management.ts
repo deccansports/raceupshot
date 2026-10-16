@@ -23,6 +23,7 @@ export const VOLUNTEER_MODULES = [
   "BIKE_CHECK_OUT",
   "MEDAL_COUNTER",
   "FOOD_COUNTER",
+  "PAID_FOOD_COUNTER",
   "LOCKER_COUNTER",
   "COUNTER",
   "FINISH_LINE_VOLUNTEER",
@@ -49,6 +50,7 @@ export interface VolunteerAssignment {
   contestUuids: string[];
   timingPointIds: string[];
   timingPointNames: string[];
+  customCounterIds: string[];
   active: boolean;
   createdAt: string;
   updatedAt: string;
@@ -86,8 +88,12 @@ export interface VolunteerOperationLog {
   participantUid: string;
   bib: string;
   athleteName: string;
+  category?: string;
+  gender?: string;
+  ageGroup?: string;
   volunteerId: string;
   volunteerName: string;
+  volunteerEmail?: string;
   action: string;
   reversesOperationId?: string;
   bikeRack?: string | null;
@@ -98,8 +104,15 @@ export interface VolunteerOperationLog {
   gunElapsedSeconds?: number | null;
   gunTime?: string | null;
   capturedAt: string;
+  serverReceivedAt?: string;
+  deviceTimeZone?: string;
+  clockSkewMilliseconds?: number | null;
+  clockWarning?: string | null;
+  configuredStartMode?: "CHIP" | "WAVE" | "GUN" | null;
+  startVerification?: string | null;
   status: string;
   overallRank?: number | null;
+  categoryRank?: number | null;
   genderRank?: number | null;
   ageGroupRank?: number | null;
   rankingStartAt?: string | null;
@@ -121,6 +134,7 @@ const assignmentInput = z.object({
   eventId: z.string().trim().min(1, "Choose an event."),
   modules: z.array(z.enum(VOLUNTEER_MODULES)).min(1, "Choose at least one module."),
   timingPointIds: z.array(z.string().trim().min(1)).max(100).default([]),
+  customCounterIds: z.array(z.string().trim().min(1)).max(100).default([]),
   active: z.boolean().default(true),
 });
 
@@ -215,13 +229,13 @@ export async function listVolunteers(): Promise<VolunteerProfile[]> {
   const rows = await mapWithConcurrency(ids, 4, (id) => kv.get<VolunteerProfile>(profileKey(id), "json"));
   return rows
     .filter((row): row is VolunteerProfile => Boolean(row))
-    .map((row) => ({ ...row, assignments: row.assignments.map((assignment) => ({ ...assignment, modules: normalizeVolunteerModules(assignment.modules) })) }))
+    .map((row) => ({ ...row, assignments: row.assignments.map((assignment) => ({ ...assignment, modules: normalizeVolunteerModules(assignment.modules), customCounterIds: assignment.customCounterIds ?? [] })) }))
     .sort((left, right) => left.name.localeCompare(right.name));
 }
 
 export async function getVolunteerById(id: string): Promise<VolunteerProfile | null> {
   const volunteer = await (await getKv()).get<VolunteerProfile>(profileKey(id), "json");
-  return volunteer ? { ...volunteer, assignments: volunteer.assignments.map((assignment) => ({ ...assignment, modules: normalizeVolunteerModules(assignment.modules) })) } : null;
+  return volunteer ? { ...volunteer, assignments: volunteer.assignments.map((assignment) => ({ ...assignment, modules: normalizeVolunteerModules(assignment.modules), customCounterIds: assignment.customCounterIds ?? [] })) } : null;
 }
 
 export async function getVolunteerByEmail(emailInput: string): Promise<VolunteerProfile | null> {
@@ -274,6 +288,7 @@ export async function saveVolunteer(input: VolunteerProfileInput): Promise<Volun
       contestUuids: event.contestUuids,
       timingPointIds,
       timingPointNames: timingPointIds.map((pointId) => pointById.get(pointId)!.name),
+      customCounterIds: [...new Set(assignment.customCounterIds)],
       active: assignment.active,
       createdAt: prior?.createdAt || now,
       updatedAt: now,
@@ -386,6 +401,46 @@ export function listVolunteerCheckIns(limit?: number) {
   return listOperationLog("checkin", limit);
 }
 
+export async function deleteVolunteerCheckInOperations(input: {
+  ids?: readonly string[];
+  actions?: readonly string[];
+  eventId?: string;
+}): Promise<{ deletedCount: number }> {
+  const kv = await getKv();
+  const indexKey = `${PREFIX}:checkin:index`;
+  const indexedIds = await readIndex(kv, indexKey);
+  const requestedIds = new Set((input.ids ?? []).map((id) => id.trim()).filter(Boolean));
+  const requestedActions = new Set((input.actions ?? []).map((action) => action.trim()).filter(Boolean));
+  const requestedEventId = input.eventId?.trim() || "";
+  if (!requestedIds.size && !requestedActions.size) throw new Error("Choose at least one log record to delete.");
+
+  const rows = await mapWithConcurrency(indexedIds, 8, async (id) => ({
+    id,
+    row: await kv.get<VolunteerOperationLog>(`${PREFIX}:checkin:${id}`, "json"),
+  }));
+  const deletedIds = new Set(rows
+    .filter(({ id, row }) => requestedIds.has(id) || Boolean(row && requestedActions.has(row.action) && (!requestedEventId || row.eventId === requestedEventId)))
+    .map(({ id }) => id));
+  if (!deletedIds.size) throw new Error("The selected volunteer log records were not found.");
+
+  await Promise.all([
+    ...[...deletedIds].map((id) => kv.delete(`${PREFIX}:checkin:${id}`)),
+    kv.put(indexKey, JSON.stringify(indexedIds.filter((id) => !deletedIds.has(id)))),
+    writeActivity(kv, {
+      action: "VOLUNTEER_LOGS_DELETED",
+      entity: `${deletedIds.size} volunteer log${deletedIds.size === 1 ? "" : "s"}`,
+      volunteerId: null,
+      eventId: requestedEventId || null,
+      actor: "Race Upshot admin",
+      severity: "warning",
+      detail: requestedActions.size
+        ? `Permanently cleared ${deletedIds.size} operation log record${deletedIds.size === 1 ? "" : "s"}${requestedEventId ? ` for event ${requestedEventId}` : ""}: ${[...requestedActions].join(", ")}.`
+        : `Permanently deleted ${deletedIds.size} selected operation log record${deletedIds.size === 1 ? "" : "s"}.`,
+    }),
+  ]);
+  return { deletedCount: deletedIds.size };
+}
+
 export function listVolunteerManualTiming(limit?: number) {
   return listOperationLog("manual-timing", limit);
 }
@@ -431,9 +486,9 @@ export function rankVolunteerManualTiming(
     .map((row) => row.reversesOperationId as string));
   const enriched = rows.map((row) => {
     const participant = participantsByIdentity.get(`${row.eventId}\u0000${row.participantUid}`);
-    if (row.action !== "MANUAL_TIMING_CAPTURED") return { ...row, overallRank: null, genderRank: null, ageGroupRank: null };
+    if (row.action !== "MANUAL_TIMING_CAPTURED") return { ...row, overallRank: null, categoryRank: null, genderRank: null, ageGroupRank: null };
     const endMilliseconds = validTimestamp(row.capturedAt);
-    if (endMilliseconds === null) return { ...row, overallRank: null, genderRank: null, ageGroupRank: null };
+    if (endMilliseconds === null) return { ...row, overallRank: null, categoryRank: null, genderRank: null, ageGroupRank: null };
     const canonical = canonicalStart(participant);
     const savedGunMilliseconds = validTimestamp(row.gunStartAt);
     const canonicalIsUsable = canonical !== null && canonical.milliseconds <= endMilliseconds;
@@ -451,7 +506,11 @@ export function rankVolunteerManualTiming(
     const startSource = canonicalIsUsable ? "CANONICAL" as const : startMilliseconds !== null ? "SAVED_GUN" as const : null;
     return {
       ...row,
+      category: row.category || participant?.contestName || "",
+      gender: row.gender || participant?.gender || "",
+      ageGroup: row.ageGroup || participant?.ageGroup || "",
       overallRank: null,
+      categoryRank: null,
       genderRank: null,
       ageGroupRank: null,
       rankingStartAt: startMilliseconds === null ? null : new Date(startMilliseconds).toISOString(),
@@ -469,7 +528,7 @@ export function rankVolunteerManualTiming(
     return [{ row, participant, baseGroup: `${row.eventId}\u0000${contest}\u0000${timingPoint}` }];
   });
   const applyRanks = (
-    key: "overallRank" | "genderRank" | "ageGroupRank",
+    key: "overallRank" | "categoryRank" | "genderRank" | "ageGroupRank",
     group: (candidate: (typeof active)[number]) => string | null,
   ) => {
     const groups = new Map<string, typeof active>();
@@ -491,6 +550,7 @@ export function rankVolunteerManualTiming(
     }
   };
   applyRanks("overallRank", (candidate) => candidate.baseGroup);
+  applyRanks("categoryRank", (candidate) => candidate.baseGroup);
   applyRanks("genderRank", (candidate) => {
     const gender = candidate.participant?.gender?.trim().toLowerCase();
     return gender ? `${candidate.baseGroup}\u0000${gender}` : null;

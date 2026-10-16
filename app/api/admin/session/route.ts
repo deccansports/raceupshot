@@ -1,5 +1,5 @@
 import { apiFailure, apiSuccess } from "@/lib/api-response";
-import { createAdminSession, isAdminAuthenticated, isConfiguredAdminEmail } from "@/lib/admin-auth";
+import { clearAdminSession, createAdminSession, isAdminAuthenticated, isConfiguredAdminEmail } from "@/lib/admin-auth";
 import { FirebaseAuthenticationError, requireFirebaseAthlete } from "@/lib/firebase-auth-server";
 
 export const dynamic = "force-dynamic";
@@ -31,4 +31,12 @@ export async function POST(request: Request) {
     }
     return apiFailure("Unable to create the admin session.", 500);
   }
+}
+
+export async function DELETE() {
+  await clearAdminSession();
+  return apiSuccess(
+    { authenticated: false },
+    { headers: { "cache-control": "private, no-store" } },
+  );
 }
