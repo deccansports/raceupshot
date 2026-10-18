@@ -12,7 +12,7 @@ import {
   type TimingEngineConfiguration,
 } from "@/packages/timing-core/src";
 import { getEventPlatformSettings } from "./platform-repository";
-import { getCanonicalParticipantIndex, publishIncrementalCanonicalParticipants } from "./canonical-live-tracking";
+import { getCanonicalLiveEvent, getCanonicalParticipantIndex, publishIncrementalCanonicalParticipants } from "./canonical-live-tracking";
 import { applyParticipantChipAssignments } from "./participant-chip-assignments";
 import { getLiveTrackingHubConfig, normalizeFinalRaceSplits } from "./live-tracking-hub-config";
 import { getEventBySlug } from "./raceupshot-repository";
@@ -47,6 +47,54 @@ function overrideKey(eventUuid: string, contestUuid: string, participantUuid: st
 }
 
 type ProviderRecord = Record<string, unknown>;
+
+/**
+ * Builds the only sequence the timing engine may use: the ordered logical
+ * splits imported from Feibot. A request may carry reader observations and
+ * clocks, but it cannot redefine course progression or the race finish.
+ */
+export function authoritativeFeibotTimingSequence(
+  hubConfig: NonNullable<Awaited<ReturnType<typeof getLiveTrackingHubConfig>>>,
+  contestUuid: string,
+  options: { requireAssignedReaders?: boolean } = {},
+): TimingEngineConfiguration["sequence"] {
+  const normalized = normalizeFinalRaceSplits(hubConfig.splits ?? []);
+  const contestSplits = normalized.filter((split) => split.providerContestUuid === contestUuid);
+  const legacyEventSplits = normalized.filter((split) => !split.providerContestUuid);
+  const selected = (contestSplits.length ? contestSplits : legacyEventSplits)
+    .filter((split) => split.timingPointId)
+    .sort((left, right) => left.order - right.order);
+  if (selected.length < 2) throw new Error(`Contest ${contestUuid} has no complete Feibot-imported split sequence.`);
+  if (new Set(selected.map((split) => split.id)).size !== selected.length) {
+    throw new Error(`Contest ${contestUuid} has duplicate logical split IDs in the Feibot-imported sequence.`);
+  }
+  if (new Set(selected.map((split) => split.order)).size !== selected.length) {
+    throw new Error(`Contest ${contestUuid} has ambiguous split ordering in the Feibot-imported sequence.`);
+  }
+  const finalSplits = selected.filter((split) => split.isFinalRaceSplit === true);
+  if (finalSplits.length !== 1 || finalSplits[0]?.id !== selected.at(-1)?.id) {
+    throw new Error(`Contest ${contestUuid} must have exactly one final logical split at the end of its Feibot-imported sequence.`);
+  }
+  const timingPoints = new Map(hubConfig.timingPoints.map((point) => [point.id, point]));
+  return selected.map((split, index) => {
+    const point = timingPoints.get(split.timingPointId!);
+    if (!point) throw new Error(`Feibot split ${split.id} references missing timing point ${split.timingPointId}.`);
+    if (options.requireAssignedReaders !== false && !point.readerUuids.length) {
+      throw new Error(`Feibot timing point ${point.id} has no assigned readers.`);
+    }
+    return {
+      timingPointKey: split.id,
+      timingPointUuid: point.id,
+      name: split.name,
+      type: timingSequenceRole(index, selected.length, point.type, split.isFinalRaceSplit),
+      order: split.order,
+      passage: Math.max(1, split.passage || 1),
+      required: split.requiredForProgression ?? true,
+      publicVisible: split.visible !== false,
+      readerUuids: [...point.readerUuids],
+    };
+  });
+}
 
 /**
  * A physical mat can be reused at intermediate boundaries and at the race
@@ -212,7 +260,6 @@ export async function storeFeibotProcessedTimingAudits(input: {
     .filter((split) => split.timingPointId)
     .sort((left, right) => left.order - right.order);
   if (configuredSplits.length < 2) return 0;
-  const timingPoints = new Map(hubConfig.timingPoints.map((point) => [point.id, point]));
   const participantIndexRows = participantIndex?.rows ?? [];
   const indexByParticipant = new Map<string, (typeof participantIndexRows)[number]>();
   for (const row of participantIndexRows) {
@@ -231,23 +278,12 @@ export async function storeFeibotProcessedTimingAudits(input: {
     const indexed = indexByParticipant.get(participant.participantUid);
     const contestUuid = indexed?.providerContestUuid || indexed?.contestUuid || fallbackContestUuid;
     if (!contestUuid) continue;
-    const orderedSplits = configuredSplits.filter((split) => !split.providerContestUuid || split.providerContestUuid === contestUuid);
+    const scopedSplits = configuredSplits.filter((split) => split.providerContestUuid === contestUuid);
+    const orderedSplits = (scopedSplits.length
+      ? scopedSplits
+      : configuredSplits.filter((split) => !split.providerContestUuid));
     if (orderedSplits.length < 2) continue;
-    const finalSplits = orderedSplits.filter((split) => split.isFinalRaceSplit === true);
-    if (finalSplits.length !== 1 || finalSplits[0]?.id !== orderedSplits.at(-1)?.id) {
-      throw new Error(`Contest ${contestUuid} must have exactly one final logical split at the end of its configured sequence.`);
-    }
-    const sequence: TimingEngineConfiguration["sequence"] = orderedSplits.map((split, index) => {
-      const point = timingPoints.get(split.timingPointId!);
-      return {
-        timingPointKey: split.id,
-        timingPointUuid: split.timingPointId!,
-        name: split.name,
-        type: timingSequenceRole(index, orderedSplits.length, point?.type, split.isFinalRaceSplit),
-        order: split.order,
-        readerUuids: point?.readerUuids ?? [],
-      };
-    });
+    const sequence = authoritativeFeibotTimingSequence(hubConfig, contestUuid, { requireAssignedReaders: false });
     const splitById = new Map(orderedSplits.map((split) => [split.id, split]));
     const chipCode = providerText(row, "chipCode", "chip_code", "chip", "Unsafe_ParticipantChipCode", "unsafe_participant_chip_code");
     if (!chipCode) continue;
@@ -344,12 +380,16 @@ export async function processAndStoreTimingBatch(input: {
   ]);
   const integration = settings?.timingIntegration;
   if (!integration?.enabled) throw new Error("Timing integration is not enabled for this event.");
+  if (!hubConfig) throw new Error("Feibot-imported timing configuration is unavailable for this event.");
   if (integration.providerEventUuid !== input.configuration.eventUuid) {
     throw new Error("Raw reads do not belong to the configured Feibot event.");
   }
   const configuration: TimingEngineConfiguration = {
     ...input.configuration,
-    sequence: [...input.configuration.sequence].sort((left, right) => left.order - right.order),
+    // Never trust a caller-supplied logical sequence. Feibot-imported splits,
+    // physical mappings, pass numbers and final-split designation are the
+    // event authority.
+    sequence: authoritativeFeibotTimingSequence(hubConfig, input.configuration.contestUuid),
     timingResultSource: integration.timingResultSource,
     resultTimeMode: integration.resultTimeMode,
     passageGapMs: integration.passageGapMs,
@@ -594,4 +634,118 @@ export async function listEventTimingAudits(eventUuid: string): Promise<AthleteT
     cursor = page.list_complete ? undefined : page.cursor;
   } while (cursor);
   return values.sort((left, right) => left.bib.localeCompare(right.bib, undefined, { numeric: true }));
+}
+
+/**
+ * Advance configured cutoff states without requiring a new RFID/provider read.
+ * The recurring event Durable Object invokes this through the live-sync flow,
+ * so CUTOFF_PENDING and DNF transitions continue when no browser is open.
+ */
+export async function reevaluateEventTimingCutoffs(input: {
+  eventId: string;
+  now?: string;
+}): Promise<{ checked: number; changed: number; published: boolean }> {
+  const now = input.now ?? new Date().toISOString();
+  if (!Number.isFinite(Date.parse(now))) throw new Error("Cutoff sweep requires a valid timestamp.");
+  const [settings, hubConfig, event, participantIndex, canonical] = await Promise.all([
+    getEventPlatformSettings(input.eventId),
+    getLiveTrackingHubConfig(input.eventId),
+    getEventBySlug(input.eventId, { includeUnpublished: true }),
+    getCanonicalParticipantIndex(input.eventId),
+    getCanonicalLiveEvent(input.eventId),
+  ]);
+  const integration = settings?.timingIntegration;
+  if (!event || !hubConfig || !integration?.enabled || !integration.providerEventUuid || !hubConfig.start.strictFinalCutoff) {
+    return { checked: 0, changed: 0, published: false };
+  }
+  const audits = await listEventTimingAudits(integration.providerEventUuid);
+  const mappedContests = new Set(hubConfig.contestMappings.map((mapping) => mapping.providerContestUuid).filter(Boolean));
+  const eligible = mappedContests.size ? audits.filter((audit) => mappedContests.has(audit.contestUuid)) : audits;
+  const kv = await getKv();
+  const changedAudits: AthleteTimingAudit[] = [];
+  for (const audit of eligible) {
+    if (!audit.officialResults.length || ["FINISHED", "DNF", "DNS", "DNQ", "DSQ", "OTL"].includes(audit.state)) continue;
+    let sequence: TimingEngineConfiguration["sequence"];
+    try {
+      sequence = authoritativeFeibotTimingSequence(hubConfig, audit.contestUuid, { requireAssignedReaders: false });
+    } catch (error) {
+      console.error(JSON.stringify({
+        type: "automatic_cutoff_configuration_invalid",
+        eventId: input.eventId,
+        contestUuid: audit.contestUuid,
+        participantUuid: audit.participantUuid,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+      continue;
+    }
+    const start = audit.officialResults.find((result) => result.timingPointType === "START");
+    if (!start) continue;
+    const configuration: TimingEngineConfiguration = {
+      eventUuid: audit.eventUuid,
+      contestUuid: audit.contestUuid,
+      timingResultSource: audit.timingResultSource,
+      resultTimeMode: integration.resultTimeMode,
+      gunStartTimestamp: hubConfig.start.gunStartAt || start.gunStartTimestamp,
+      startWindowOpenTimestamp: hubConfig.start.startWindowOpenAt || start.gunStartTimestamp,
+      startWindowCloseTimestamp: hubConfig.start.startWindowCloseAt,
+      eventEndTimestamp: hubConfig.start.eventEndAt,
+      passageGapMs: integration.passageGapMs,
+      readerDetectionTimeoutMs: integration.readerDetectionTimeoutMs,
+      minimumFinishGapMs: Math.max(0, hubConfig.start.minimumFinishGapSeconds) * 1_000,
+      sequence,
+    };
+    const waveStartTime = participantIndex?.rows.find((row) =>
+      row.participantUuid === audit.participantUuid || row.sourceParticipantUid === audit.participantUuid,
+    )?.waveStartTime;
+    const next = enforceConfiguredCutoffs({
+      audit,
+      previousAudit: audit,
+      configuration,
+      hubConfig,
+      now,
+      ticketDefinitions: event.ticketDefinitions,
+      waveStartTime,
+    });
+    const previousState = JSON.stringify({
+      state: audit.state,
+      statusReason: audit.statusReason,
+      statusSource: audit.statusSource,
+      statusResolvedAt: audit.statusResolvedAt,
+      failedCheckpoint: audit.failedCheckpoint,
+      cutoffDeadline: audit.cutoffDeadline,
+      cutoffReconcileAt: audit.cutoffReconcileAt,
+    });
+    const nextState = JSON.stringify({
+      state: next.state,
+      statusReason: next.statusReason,
+      statusSource: next.statusSource,
+      statusResolvedAt: next.statusResolvedAt,
+      failedCheckpoint: next.failedCheckpoint,
+      cutoffDeadline: next.cutoffDeadline,
+      cutoffReconcileAt: next.cutoffReconcileAt,
+    });
+    if (previousState === nextState) continue;
+    await kv.put(auditKey(next.eventUuid, next.contestUuid, next.participantUuid), JSON.stringify(next));
+    changedAudits.push(next);
+  }
+  if (!changedAudits.length) return { checked: eligible.length, changed: 0, published: false };
+  const changedIds = new Set(changedAudits.flatMap((audit) => [audit.participantUuid, audit.bib]).filter(Boolean));
+  const rows = canonical?.participants.filter((participant) =>
+    changedIds.has(participant.participantUid) || changedIds.has(participant.bib),
+  ) ?? [];
+  const published = rows.length > 0 && await publishIncrementalCanonicalParticipants({
+    eventId: input.eventId,
+    providerEventUuid: integration.providerEventUuid,
+    rows: rows.map((participant) => ({ ...participant })),
+    reason: "race_status_updated",
+  });
+  console.info(JSON.stringify({
+    type: "automatic_cutoff_sweep_completed",
+    eventId: input.eventId,
+    checked: eligible.length,
+    changed: changedAudits.length,
+    published,
+    evaluatedAt: now,
+  }));
+  return { checked: eligible.length, changed: changedAudits.length, published };
 }

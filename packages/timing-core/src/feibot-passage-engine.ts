@@ -16,6 +16,8 @@ export interface FeibotRawRead {
   bib: string;
   chipCode: string;
   timingPointUuid: string;
+  /** Provider-supplied logical use/pass number when available. */
+  passage?: number | null;
   readerUuid: string;
   antennaId: string | null;
   rssi: number | null;
@@ -30,6 +32,12 @@ export interface CourseTimingPoint {
   name: string;
   type: "START" | "SPLIT" | "FINISH";
   order: number;
+  /** Feibot's logical use/pass number when one physical point is reused. */
+  passage?: number;
+  /** Missing optional checkpoints do not block a later configured checkpoint. */
+  required?: boolean;
+  /** Presentation metadata only; never used to discard physical evidence. */
+  publicVisible?: boolean;
   readerUuids: string[];
 }
 
@@ -57,6 +65,7 @@ export interface TimingPassage {
   bib: string;
   chipCode: string;
   timingPointUuid: string;
+  passage?: number | null;
   readerUuid: string;
   firstTimestamp: string;
   lastTimestamp: string;
@@ -191,6 +200,36 @@ function expectedState(sequence: CourseTimingPoint[], index: number): string {
   return `WAITING_FOR_SPLIT_${index}`;
 }
 
+function canSkipOptionalPoints(sequence: CourseTimingPoint[], fromIndex: number, toIndex: number): boolean {
+  return toIndex >= fromIndex
+    && sequence.slice(fromIndex, toIndex).every((point) => point.required === false && point.type !== "START" && point.type !== "FINISH");
+}
+
+function completedConfiguredSequence(sequence: CourseTimingPoint[], results: OfficialTimingPointResult[]): boolean {
+  const acceptedKeys = new Set(results.map((result) => result.timingPointKey));
+  const finish = sequence.at(-1);
+  return Boolean(
+    sequence.length > 1
+    && sequence[0]?.type === "START"
+    && finish?.type === "FINISH"
+    && sequence.slice(0, -1).every((point) => point.type !== "FINISH")
+    && acceptedKeys.has(finish.timingPointKey)
+    && sequence.filter((point) => point.required !== false).every((point) => acceptedKeys.has(point.timingPointKey)),
+  );
+}
+
+function stateAfterResults(sequence: CourseTimingPoint[], results: OfficialTimingPointResult[]): string {
+  if (completedConfiguredSequence(sequence, results)) return "FINISHED";
+  const acceptedKeys = new Set(results.map((result) => result.timingPointKey));
+  const lastAcceptedIndex = sequence.reduce(
+    (latest, point, index) => acceptedKeys.has(point.timingPointKey) ? Math.max(latest, index) : latest,
+    -1,
+  );
+  let nextIndex = lastAcceptedIndex + 1;
+  while (nextIndex < sequence.length && sequence[nextIndex]?.required === false) nextIndex += 1;
+  return expectedState(sequence, nextIndex);
+}
+
 function eligibleRead(
   read: FeibotRawRead,
   configuration: TimingEngineConfiguration,
@@ -235,7 +274,7 @@ export function groupFeibotPassages(
   const passages: TimingPassage[] = [];
   const latestByDetection = new Map<string, TimingPassage>();
   for (const read of eligible) {
-    const detectionKey = `${read.chipCode}:${read.timingPointUuid}:${read.readerUuid}`;
+    const detectionKey = `${read.chipCode}:${read.timingPointUuid}:${read.readerUuid}:${read.passage ?? ""}`;
     const previous = latestByDetection.get(detectionKey);
     const timeout = Math.max(
       configuration.passageGapMs,
@@ -260,6 +299,7 @@ export function groupFeibotPassages(
       bib: read.bib,
       chipCode: read.chipCode,
       timingPointUuid: read.timingPointUuid,
+      passage: read.passage ?? null,
       readerUuid: read.readerUuid,
       firstTimestamp: read.readerTimestamp,
       lastTimestamp: read.readerTimestamp,
@@ -335,7 +375,10 @@ function applyOverrides(
   const recalculated: OfficialTimingPointResult[] = [];
   for (const point of configuration.sequence) {
     const readerTimestamp = timestamps.get(point.timingPointKey);
-    if (!readerTimestamp) break;
+    if (!readerTimestamp) {
+      if (point.required === false) continue;
+      break;
+    }
     if (previousTimestamp && timestampMs(readerTimestamp, "readerTimestamp") < timestampMs(previousTimestamp, "previousTimestamp")) {
       throw new Error(`Manual override for ${point.timingPointKey} violates the configured course sequence.`);
     }
@@ -397,14 +440,16 @@ export function processFeibotAthleteTiming(input: {
         .filter((index) => index >= 0);
       // A shared physical point is resolved by athlete progression. Explicit
       // logical keys remain authoritative when Feibot supplies them.
+      const physicalResolvedIndex = matchingIndexes.includes(expectedIndex)
+        ? expectedIndex
+        : matchingIndexes.find((index) => index >= expectedIndex && canSkipOptionalPoints(configuration.sequence, expectedIndex, index)) ?? -1;
       const resolvedIndex = keyedIndex >= 0
         ? keyedIndex
-        : matchingIndexes.includes(expectedIndex)
-          ? expectedIndex
-          : matchingIndexes.find((index) => index >= expectedIndex) ?? matchingIndexes.at(-1) ?? -1;
+        : physicalResolvedIndex;
       const resolved = resolvedIndex >= 0 ? configuration.sequence[resolvedIndex] : null;
       const passageId = `feibot-processed-${row.sourceIndex + 1}`;
-      if (!expected || !resolved || resolvedIndex !== expectedIndex) {
+      const skippedOnlyOptional = Boolean(expected && resolved && canSkipOptionalPoints(configuration.sequence, expectedIndex, resolvedIndex));
+      if (!expected || !resolved || !skippedOnlyOptional) {
         const alreadyAccepted = resolvedIndex >= 0 && resolvedIndex < expectedIndex;
         decisions.push({
           passageId,
@@ -427,20 +472,20 @@ export function processFeibotAthleteTiming(input: {
         decisions.push({ passageId, decision: "INELIGIBLE", expectedTimingPointUuid: expected.timingPointUuid, expectedTimingPointKey: expected.timingPointKey, resolvedTimingPointUuid: null, resolvedTimingPointKey: null, reason: processedAt < timestampMs(configuration.startWindowOpenTimestamp, "startWindowOpenTimestamp") ? "before_start_window" : "after_event_window" });
         continue;
       }
-      if (expected.type === "START" && configuration.startWindowCloseTimestamp
+      if (resolved.type === "START" && configuration.startWindowCloseTimestamp
         && timestampMs(row.result.readerTimestamp, "readerTimestamp") > timestampMs(configuration.startWindowCloseTimestamp, "startWindowCloseTimestamp")) {
         decisions.push({ passageId, decision: "INELIGIBLE", expectedTimingPointUuid: expected.timingPointUuid, expectedTimingPointKey: expected.timingPointKey, resolvedTimingPointUuid: null, resolvedTimingPointKey: null, reason: "after_start_window" });
         continue;
       }
       const startTimestamp = accepted[0]?.result.readerTimestamp;
-      if (expected.type === "FINISH" && startTimestamp
+      if (resolved.type === "FINISH" && startTimestamp
         && timestampMs(row.result.readerTimestamp, "readerTimestamp") - timestampMs(startTimestamp, "startTimestamp") < Math.max(0, configuration.minimumFinishGapMs ?? 0)) {
         decisions.push({ passageId, decision: "INELIGIBLE", expectedTimingPointUuid: expected.timingPointUuid, expectedTimingPointKey: expected.timingPointKey, resolvedTimingPointUuid: null, resolvedTimingPointKey: null, reason: "before_minimum_finish_gap" });
         continue;
       }
-      accepted.push({ ...row, point: expected });
-      decisions.push({ passageId, decision: "ACCEPTED", expectedTimingPointUuid: expected.timingPointUuid, expectedTimingPointKey: expected.timingPointKey, resolvedTimingPointUuid: expected.timingPointUuid, resolvedTimingPointKey: expected.timingPointKey, reason: `accepted_as_${expected.type.toLowerCase()}` });
-      expectedIndex += 1;
+      accepted.push({ ...row, point: resolved });
+      decisions.push({ passageId, decision: "ACCEPTED", expectedTimingPointUuid: expected.timingPointUuid, expectedTimingPointKey: expected.timingPointKey, resolvedTimingPointUuid: resolved.timingPointUuid, resolvedTimingPointKey: resolved.timingPointKey, reason: resolvedIndex === expectedIndex ? `accepted_as_${resolved.type.toLowerCase()}` : "accepted_after_optional_checkpoint_skip" });
+      expectedIndex = resolvedIndex + 1;
     }
     const chipStartTimestamp = accepted[0]?.point.type === "START" ? accepted[0].result.readerTimestamp : null;
     const mappedResults: OfficialTimingPointResult[] = chipStartTimestamp ? accepted.map(({ result, point, sourceIndex }, index) => {
@@ -473,13 +518,6 @@ export function processFeibotAthleteTiming(input: {
       };
     }) : [];
     const officialResults = applyOverrides(mappedResults, input.manualOverrides ?? [], configuration, identity);
-    const configuredFinishIsFinal = configuration.sequence.length > 1
-      && configuration.sequence[0]?.type === "START"
-      && configuration.sequence.at(-1)?.type === "FINISH"
-      && configuration.sequence.slice(0, -1).every((point) => point.type !== "FINISH");
-    const completedConfiguredSequence = configuredFinishIsFinal
-      && officialResults.length === configuration.sequence.length
-      && officialResults.at(-1)?.timingPointKey === configuration.sequence.at(-1)?.timingPointKey;
     return {
       eventUuid: configuration.eventUuid,
       contestUuid: configuration.contestUuid,
@@ -487,7 +525,7 @@ export function processFeibotAthleteTiming(input: {
       bib: identity?.bib ?? "",
       chipCode: identity?.chipCode ?? "",
       timingResultSource: configuration.timingResultSource,
-      state: completedConfiguredSequence ? "FINISHED" : expectedState(configuration.sequence, officialResults.length),
+      state: stateAfterResults(configuration.sequence, officialResults),
       rawReads: input.rawReads,
       passages: [],
       decisions,
@@ -503,12 +541,20 @@ export function processFeibotAthleteTiming(input: {
   let expectedIndex = 0;
   for (const passage of passages) {
     const expected = configuration.sequence[expectedIndex] ?? null;
-    const matchedIndex = configuration.sequence.findIndex((point) => point.timingPointUuid === passage.timingPointUuid);
+    const matchingIndexes = configuration.sequence
+      .map((point, index) => point.timingPointUuid === passage.timingPointUuid
+        && (passage.passage == null || point.passage == null || point.passage === passage.passage)
+        ? index
+        : -1)
+      .filter((index) => index >= 0);
+    const matchedIndex = matchingIndexes.includes(expectedIndex)
+      ? expectedIndex
+      : matchingIndexes.find((index) => index >= expectedIndex && canSkipOptionalPoints(configuration.sequence, expectedIndex, index)) ?? matchingIndexes[0] ?? -1;
     if (!expected) {
       decisions.push({ passageId: passage.passageId, decision: "UNEXPECTED_PASSAGE", expectedTimingPointUuid: null, expectedTimingPointKey: null, resolvedTimingPointUuid: null, resolvedTimingPointKey: null, reason: "athlete_already_finished" });
       continue;
     }
-    if (passage.timingPointUuid !== expected.timingPointUuid) {
+    if (matchedIndex < expectedIndex || !canSkipOptionalPoints(configuration.sequence, expectedIndex, matchedIndex)) {
       const alreadyAccepted = matchedIndex >= 0 && matchedIndex < expectedIndex;
       decisions.push({
         passageId: passage.passageId,
@@ -517,24 +563,25 @@ export function processFeibotAthleteTiming(input: {
         expectedTimingPointKey: expected.timingPointKey,
         resolvedTimingPointUuid: null,
         resolvedTimingPointKey: null,
-        reason: alreadyAccepted ? "timing_point_already_accepted" : "not_the_expected_next_timing_point",
+        reason: alreadyAccepted ? "timing_point_already_accepted" : "required_preceding_timing_point_missing",
       });
       continue;
     }
-    if (expected.type === "START" && configuration.startWindowCloseTimestamp
+    const resolved = configuration.sequence[matchedIndex];
+    if (resolved.type === "START" && configuration.startWindowCloseTimestamp
       && timestampMs(passage.firstTimestamp, "firstTimestamp") > timestampMs(configuration.startWindowCloseTimestamp, "startWindowCloseTimestamp")) {
       decisions.push({ passageId: passage.passageId, decision: "INELIGIBLE", expectedTimingPointUuid: expected.timingPointUuid, expectedTimingPointKey: expected.timingPointKey, resolvedTimingPointUuid: null, resolvedTimingPointKey: null, reason: "after_start_window" });
       continue;
     }
     const acceptedStartTimestamp = accepted[0]?.passage.firstTimestamp;
-    if (expected.type === "FINISH" && acceptedStartTimestamp
+    if (resolved.type === "FINISH" && acceptedStartTimestamp
       && timestampMs(passage.firstTimestamp, "firstTimestamp") - timestampMs(acceptedStartTimestamp, "startTimestamp") < Math.max(0, configuration.minimumFinishGapMs ?? 0)) {
       decisions.push({ passageId: passage.passageId, decision: "INELIGIBLE", expectedTimingPointUuid: expected.timingPointUuid, expectedTimingPointKey: expected.timingPointKey, resolvedTimingPointUuid: null, resolvedTimingPointKey: null, reason: "before_minimum_finish_gap" });
       continue;
     }
-    accepted.push({ passage, point: expected });
-    decisions.push({ passageId: passage.passageId, decision: "ACCEPTED", expectedTimingPointUuid: expected.timingPointUuid, expectedTimingPointKey: expected.timingPointKey, resolvedTimingPointUuid: expected.timingPointUuid, resolvedTimingPointKey: expected.timingPointKey, reason: `accepted_as_${expected.type.toLowerCase()}` });
-    expectedIndex += 1;
+    accepted.push({ passage, point: resolved });
+    decisions.push({ passageId: passage.passageId, decision: "ACCEPTED", expectedTimingPointUuid: expected.timingPointUuid, expectedTimingPointKey: expected.timingPointKey, resolvedTimingPointUuid: resolved.timingPointUuid, resolvedTimingPointKey: resolved.timingPointKey, reason: matchedIndex === expectedIndex ? `accepted_as_${resolved.type.toLowerCase()}` : "accepted_after_optional_checkpoint_skip" });
+    expectedIndex = matchedIndex + 1;
   }
 
   const chipStartTimestamp = accepted[0]?.point.type === "START" ? accepted[0].passage.firstTimestamp : null;
@@ -555,7 +602,7 @@ export function processFeibotAthleteTiming(input: {
     bib: firstRead?.bib ?? "",
     chipCode: firstRead?.chipCode ?? "",
     timingResultSource: configuration.timingResultSource,
-    state: expectedState(configuration.sequence, officialResults.length),
+    state: stateAfterResults(configuration.sequence, officialResults),
     rawReads: input.rawReads,
     passages,
     decisions,

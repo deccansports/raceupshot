@@ -248,6 +248,9 @@ export function normalizeFeibotParticipant(
   if (!participantUid) throw new Error("Timing participant is missing a stable participant UID.");
   const bib = value(record, "bib", "bibNumber", "bib_number", "Unsafe_ParticipantBib", "unsafe_participant_bib");
   const providerRaceStatus = record.raceStatus ?? record.status;
+  const normalizedProviderRaceStatus = providerRaceStatus == null || String(providerRaceStatus).trim() === ""
+    ? "NOT_STARTED"
+    : normalizeRaceStatus(providerRaceStatus);
   const initials = fullName.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "RU";
   return {
     eventId: context.eventId,
@@ -265,9 +268,10 @@ export function normalizeFeibotParticipant(
     club: value(record, "club", "clubName", "club_name") || undefined,
     team: value(record, "team", "teamName") || undefined,
     visibility: normalizeVisibility(record.visibility ?? record.privacyStatus),
-    raceStatus: providerRaceStatus == null || String(providerRaceStatus).trim() === ""
-      ? "NOT_STARTED"
-      : normalizeRaceStatus(providerRaceStatus),
+    // A roster/result status alone is not finish evidence. Only the calculated
+    // result normalizer (with the complete configured logical sequence) or the
+    // canonical timing audit may promote an athlete to FINISHED.
+    raceStatus: normalizedProviderRaceStatus === "FINISHED" ? "STARTED" : normalizedProviderRaceStatus,
     currentLeg: value(record, "currentLeg", "current_leg") || undefined,
     elapsedTime: value(record, "elapsedTime", "elapsed_time") || undefined,
     latestTimingPoint: value(record, "latestTimingPoint", "latest_timing_point") || undefined,

@@ -484,6 +484,61 @@ function stale(lastUpdatedAt: string | null, thresholdSeconds = 60): boolean {
   return Number.isNaN(parsed) || Date.now() - parsed > thresholdSeconds * 1000;
 }
 
+type PublicSplitVisibilityConfig = {
+  contestMappings?: Array<{ contestId?: string; providerContestUuid?: string }>;
+  splits?: Array<{ id?: string; name?: string; importedName?: string | null; providerContestUuid?: string | null; visible?: boolean }>;
+};
+
+function splitIdentity(value: unknown): string {
+  return String(value ?? "").trim().toLocaleLowerCase("en-US");
+}
+
+/** Remove hidden split presentation without mutating canonical timing evidence. */
+export function sanitizePublicParticipantSplits(
+  participant: LiveParticipant,
+  config: PublicSplitVisibilityConfig | null | undefined,
+): LiveParticipant {
+  if (!config?.splits?.length) return participant;
+  const contestTokens = new Set([participant.contestId, participant.contestName].map(splitIdentity).filter(Boolean));
+  for (const mapping of config.contestMappings ?? []) {
+    const local = splitIdentity(mapping.contestId);
+    const provider = splitIdentity(mapping.providerContestUuid);
+    if (contestTokens.has(local) || contestTokens.has(provider)) {
+      if (local) contestTokens.add(local);
+      if (provider) contestTokens.add(provider);
+    }
+  }
+  if ((config.contestMappings?.length ?? 0) === 1) {
+    const only = config.contestMappings![0];
+    const local = splitIdentity(only?.contestId);
+    const provider = splitIdentity(only?.providerContestUuid);
+    if (local) contestTokens.add(local);
+    if (provider) contestTokens.add(provider);
+  }
+  const scoped = config.splits.filter((split) => {
+    const scope = splitIdentity(split.providerContestUuid);
+    return !scope || contestTokens.size === 0 || contestTokens.has(scope);
+  });
+  const hiddenIdentities = new Set(scoped
+    .filter((split) => split.visible === false)
+    .flatMap((split) => [split.id, split.name, split.importedName])
+    .map(splitIdentity)
+    .filter(Boolean));
+  if (!hiddenIdentities.size) return participant;
+  const splits = participant.splits.filter((split) => (
+    !hiddenIdentities.has(splitIdentity(split.splitId))
+    && !hiddenIdentities.has(splitIdentity(split.name))
+  ));
+  const latestVisible = splits.at(-1);
+  const exposedCurrent = splitIdentity(participant.latestTimingPoint);
+  return {
+    ...participant,
+    splits,
+    latestTimingPoint: hiddenIdentities.has(exposedCurrent) ? latestVisible?.name : participant.latestTimingPoint,
+    latestSplitTime: hiddenIdentities.has(exposedCurrent) ? latestVisible?.splitTime : participant.latestSplitTime,
+  };
+}
+
 async function getPublicParticipants(
   eventIdOrSlug: string,
   purpose: "live" | "results",
@@ -529,7 +584,7 @@ async function getPublicParticipants(
       ? { manifest: canonicalDetail.manifest, participants: [canonicalDetail.participant], leaderboard: [] }
       : await getCanonicalLiveEvent(event.eventId)
     : null;
-  const [payload, updatedRaw, visibilityOverrides] = await Promise.all([
+  const [payload, updatedRaw, visibilityOverrides, splitVisibilityConfig] = await Promise.all([
     canonical
       ? Promise.resolve(null)
       : kv.get<unknown>(`${PREFIX}:live:event:${event.eventId}:participants`, "json"),
@@ -538,6 +593,7 @@ async function getPublicParticipants(
       `${PREFIX}:live:event:${event.eventId}:${VISIBILITY_OVERRIDE_SUFFIX}`,
       "json",
     ),
+    kv.get<PublicSplitVisibilityConfig>(`${PREFIX}:live:event:${event.eventId}:hub-config`, "json"),
   ]);
   // Schedule ownership is established by canonical publication and bulk live
   // entry points. Reconfiguring the Durable Object on every one-second athlete
@@ -602,7 +658,8 @@ async function getPublicParticipants(
     accountUid,
     accountEmail,
   }) => {
-    const rawVisibility = participant.visibility ?? normalizeVisibility("PUBLIC");
+    const publicParticipant = sanitizePublicParticipantSplits(participant, splitVisibilityConfig);
+    const rawVisibility = publicParticipant.visibility ?? normalizeVisibility("PUBLIC");
     const context = privacyLookup
       ? privacyContextForParticipantFromLookup(privacyLookup, raw, participant, accountUid, accountEmail)
       : raw
@@ -612,7 +669,7 @@ async function getPublicParticipants(
     const adminOverride = visibilityOverrides?.[participant.participantUid] ?? null;
     if (viewerOwnsParticipant(viewer, context)) {
       return {
-        ...participant,
+        ...publicParticipant,
         visibility: resolveAthleteVisibility({
           eventSettings: privacySettings,
           athletePreference: preference?.liveTrackingVisibility ?? rawVisibility,
@@ -620,7 +677,7 @@ async function getPublicParticipants(
         }),
       };
     }
-    return applyPublicAthletePrivacy({ ...participant, visibility: rawVisibility }, privacySettings, preference, adminOverride);
+    return applyPublicAthletePrivacy({ ...publicParticipant, visibility: rawVisibility }, privacySettings, preference, adminOverride);
   }))).filter((participant): participant is LiveParticipant => Boolean(participant));
   return {
     data: publicParticipants,
@@ -649,13 +706,17 @@ export async function searchPublicLiveParticipants(eventIdOrSlug: string, query:
     status: event.lifecycleStatus.toLowerCase() as RaceEvent["status"], categories: event.contests,
     participants: event.participantCount, accent: "", shortCode: "", description: event.description, hasResults: event.hasResults,
   });
-  const visibilityOverrides = await kv.get<Record<string, AthleteVisibility>>(`${PREFIX}:live:event:${event.eventId}:${VISIBILITY_OVERRIDE_SUFFIX}`, "json");
+  const [visibilityOverrides, splitVisibilityConfig] = await Promise.all([
+    kv.get<Record<string, AthleteVisibility>>(`${PREFIX}:live:event:${event.eventId}:${VISIBILITY_OVERRIDE_SUFFIX}`, "json"),
+    kv.get<PublicSplitVisibilityConfig>(`${PREFIX}:live:event:${event.eventId}:hub-config`, "json"),
+  ]);
   const data = (await Promise.all(canonical.participants.map(async (participant) => {
+    const publicParticipant = sanitizePublicParticipantSplits(participant, splitVisibilityConfig);
     const context = await privacyContextFromIdentity(kv, participant.athleteUid, undefined);
-    const rawVisibility = participant.visibility ?? normalizeVisibility("PUBLIC");
+    const rawVisibility = publicParticipant.visibility ?? normalizeVisibility("PUBLIC");
     const adminOverride = visibilityOverrides?.[participant.participantUid] ?? null;
-    if (viewerOwnsParticipant(viewer, context)) return { ...participant, visibility: resolveAthleteVisibility({ eventSettings: settings.live, athletePreference: context.preference?.liveTrackingVisibility ?? rawVisibility, adminOverride }) };
-    return applyPublicAthletePrivacy({ ...participant, visibility: rawVisibility }, settings.live, context.preference, adminOverride);
+    if (viewerOwnsParticipant(viewer, context)) return { ...publicParticipant, visibility: resolveAthleteVisibility({ eventSettings: settings.live, athletePreference: context.preference?.liveTrackingVisibility ?? rawVisibility, adminOverride }) };
+    return applyPublicAthletePrivacy({ ...publicParticipant, visibility: rawVisibility }, settings.live, context.preference, adminOverride);
   }))).filter((participant): participant is LiveParticipant => Boolean(participant));
   const lastUpdatedAt = canonicalManifestUpdatedAt(canonical.manifest);
   return { data, lastUpdatedAt, source: "timing-provider", provider: "FEIBOT", isStale: stale(lastUpdatedAt), cacheSeconds: 0 };
@@ -991,23 +1052,25 @@ export async function getPublicResultParticipant(
     if (!event) return null;
     const kv = await getKv();
     const participant = athleteToLiveParticipant(stored.athlete);
-    const [context, visibilityOverrides] = await Promise.all([
+    const [context, visibilityOverrides, splitVisibilityConfig] = await Promise.all([
       privacyContextFromIdentity(kv, stored.athlete.athleteUid, stored.athlete.email),
       kv.get<Record<string, AthleteVisibility>>(
         `${PREFIX}:live:event:${event.eventId}:${VISIBILITY_OVERRIDE_SUFFIX}`,
         "json",
       ),
+      kv.get<PublicSplitVisibilityConfig>(`${PREFIX}:live:event:${event.eventId}:hub-config`, "json"),
     ]);
     const privacySettings = {
       ...event.liveSettings,
       liveTrackingEnabled: true,
       publicLiveTrackingEnabled: true,
     };
-    const rawVisibility = participant.visibility ?? normalizeVisibility("PUBLIC");
+    const publicParticipant = sanitizePublicParticipantSplits(participant, splitVisibilityConfig);
+    const rawVisibility = publicParticipant.visibility ?? normalizeVisibility("PUBLIC");
     const adminOverride = visibilityOverrides?.[participant.participantUid] ?? null;
     const data = viewerOwnsParticipant(viewer, context)
       ? {
-          ...participant,
+          ...publicParticipant,
           visibility: resolveAthleteVisibility({
             eventSettings: privacySettings,
             athletePreference: context.preference?.liveTrackingVisibility ?? rawVisibility,
@@ -1015,7 +1078,7 @@ export async function getPublicResultParticipant(
           }),
         }
       : applyPublicAthletePrivacy(
-          { ...participant, visibility: rawVisibility },
+          { ...publicParticipant, visibility: rawVisibility },
           privacySettings,
           context.preference,
           adminOverride,

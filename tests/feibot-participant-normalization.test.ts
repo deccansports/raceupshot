@@ -1,7 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { buildFeibotCanonicalParticipantRows, normalizedParticipantRows } from "@/lib/feibot-integration";
+import { normalizeFeibotParticipant } from "@/packages/timing-core/src";
 
 describe("Feibot participant canonicalization", () => {
+  it("does not accept a roster-level FINISHED flag without the configured final split", () => {
+    expect(normalizeFeibotParticipant({
+      participantUuid: "provider-athlete-1",
+      bib: "1001",
+      status: "FINISHED",
+    }, { eventId: "event" }).raceStatus).toBe("STARTED");
+  });
+
   it("normalizes Workbench participant fields and their Feibot chip", () => {
     const [row] = normalizedParticipantRows([{
       ParticipantUUID: "provider-athlete-1",

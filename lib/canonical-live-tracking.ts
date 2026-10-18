@@ -709,12 +709,20 @@ export async function publishIncrementalCanonicalParticipants(input: {
     targeted[indexPosition]?.baseVersion === version ? targeted[indexPosition]?.participant : null,
   ));
   const currentParticipants = participants.map((participant, indexPosition) => mergeCanonicalParticipantState(
-    timingParticipants[indexPosition]?.raceStatus === "FINISHED" && ["DNF", "CUTOFF_PENDING"].includes(previousParticipants[indexPosition].raceStatus)
+    timingParticipants[indexPosition]
+      && timingParticipants[indexPosition]?.raceStatus !== "FINISHED"
+      && previousParticipants[indexPosition].raceStatus === "FINISHED"
       ? { ...previousParticipants[indexPosition], raceStatus: "STARTED" }
-      : previousParticipants[indexPosition],
-    timingParticipants[indexPosition]?.raceStatus === "FINISHED" && ["DNF", "CUTOFF_PENDING"].includes(participant.raceStatus)
+      : timingParticipants[indexPosition]?.raceStatus === "FINISHED" && ["DNF", "CUTOFF_PENDING"].includes(previousParticipants[indexPosition].raceStatus)
+        ? { ...previousParticipants[indexPosition], raceStatus: "STARTED" }
+        : previousParticipants[indexPosition],
+    timingParticipants[indexPosition]
+      && timingParticipants[indexPosition]?.raceStatus !== "FINISHED"
+      && participant.raceStatus === "FINISHED"
       ? { ...participant, raceStatus: "STARTED" }
-      : participant,
+      : timingParticipants[indexPosition]?.raceStatus === "FINISHED" && ["DNF", "CUTOFF_PENDING"].includes(participant.raceStatus)
+        ? { ...participant, raceStatus: "STARTED" }
+        : participant,
     timingParticipants[indexPosition],
   ));
   const timingFingerprint = (participant: LiveParticipant) => JSON.stringify({

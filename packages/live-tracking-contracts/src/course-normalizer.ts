@@ -43,6 +43,7 @@ interface ProviderSplit {
   passNumber: number | null;
   readSelectionRule: CanonicalReadSelectionRule | null;
   rankingEnabled: boolean;
+  publicVisible: boolean;
   required: boolean;
   isStart: boolean;
   isFinish: boolean;
@@ -159,6 +160,10 @@ function parseLegs(timingRules: UnknownRecord): ProviderLeg[] {
 function parseSplits(timingRules: UnknownRecord, configuredDistanceKm: number): ProviderSplit[] {
   return collection(timingRules, ['splits', 'timingSplits']).map((value, index) => {
     const row = record(value);
+    const configuredVisible = optionalBooleanAt(row, ['public_visible', 'publicVisible', 'visible', 'isVisible']);
+    const configuredHidden = optionalBooleanAt(row, ['hidden', 'isHidden', 'hideSplit']);
+    const publicVisible = configuredVisible ?? (configuredHidden === null ? true : !configuredHidden);
+    const configuredRequired = optionalBooleanAt(row, ['required', 'isRequired', 'Must']);
     return {
       id: textAt(row, ['split_uuid', 'splitUuid', 'uuid', 'UUID', 'id', 'ID']),
       contestUuid: textAt(row, ['contest_uuid', 'contestUuid', 'ContestUUID', 'contest_id', 'contestId']),
@@ -175,7 +180,10 @@ function parseSplits(timingRules: UnknownRecord, configuredDistanceKm: number): 
       passNumber: numberAt(row, ['pass_number', 'passNumber', 'CalculatedTimingPointUsePassNum', 'calculatedTimingPointUsePassNum']),
       readSelectionRule: readRule(valueAt(row, ['read_selection_rule', 'readSelectionRule'])),
       rankingEnabled: booleanAt(row, ['ranking_enabled', 'rankingEnabled', 'leaderboard', 'isLeaderboard'], true),
-      required: booleanAt(row, ['required', 'isRequired', 'Must'], true),
+      publicVisible,
+      // Visibility is presentation metadata. Legacy checkpoints were required
+      // unless an operator explicitly marked them optional.
+      required: configuredRequired ?? true,
       isStart: booleanAt(row, ['is_start', 'isStart', 'IsStart']),
       isFinish: booleanAt(row, ['is_finish', 'isFinish', 'IsFinish']),
       timingPointType: timingPointType(valueAt(row, ['timing_point_type', 'timingPointType', 'type'])),
@@ -476,6 +484,7 @@ function buildLegs(
         readSelectionRule: explicitMapping?.readSelectionRule ?? split.readSelectionRule,
         passNumber: explicitMapping?.passNumber ?? split.passNumber,
         rankingEnabled: explicitMapping?.rankingEnabled ?? split.rankingEnabled,
+        publicVisible: explicitMapping?.publicVisible ?? split.publicVisible,
         required: explicitMapping?.required ?? split.required,
         isRaceStart,
         isLegStart,

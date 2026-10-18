@@ -379,7 +379,7 @@ export function buildCanonicalLeaderboards(input: BuildCanonicalLeaderboardsInpu
 
     const summaryRows: CanonicalSplitSummary['splits'] = [];
     const rankingSplits = [...contest.splits]
-      .filter((split) => split.rankingEnabled)
+      .filter((split) => split.rankingEnabled && split.publicVisible !== false)
       .sort((left, right) => left.order - right.order);
     let previousOverallSplit: CanonicalSplitLeaderboard | null = null;
     let previousClubSplit: CanonicalSplitLeaderboard | null = null;

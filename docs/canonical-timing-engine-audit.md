@@ -1,6 +1,6 @@
 # Canonical timing engine audit
 
-Date: 2026-10-10
+Date: 2026-10-10 (follow-up validated 2026-10-18)
 
 ## Scope and pre-change findings
 
@@ -35,6 +35,15 @@ An out-of-order or future checkpoint remains raw/auditable but does not advance 
 - Authorized manual overrides remain higher priority than automatic/provider results.
 - No raw reads or existing official results are deleted or rewritten by this change.
 
+## 2026-10-18 follow-up hardening
+
+- Raw timing ingestion now rebuilds the logical sequence exclusively from the stored, Feibot-imported contest configuration. A caller can submit reader evidence and clock settings, but cannot redefine split order, pass numbers, physical-point mappings, or the final split.
+- Contest sequences are rejected when logical IDs or order values are duplicated, a referenced physical timing point is missing, readers are unassigned for raw ingestion, or the one explicit race-final split is not last.
+- Provider roster status alone can no longer promote an athlete to `FINISHED`. Canonical timing evidence or a calculated result that completes the exact configured sequence is required.
+- Incremental canonical publication demotes stale provider `FINISHED` state when the authoritative timing audit remains on course.
+- Mobile matching separates logical split IDs from physical mat IDs. A physical mat reused by multiple logical splits is accepted only when the Feibot pass/use number identifies the correct occurrence; an ambiguous physical-only read is not displayed as multiple completed splits.
+- Mobile race state requires the configured row's explicit `isRaceFinish` marker. A completed section or a leg-boundary label such as Swim Finish or Bike Finish cannot finish the race.
+
 ## Regression matrix
 
 - A: Swim Finish cannot finish a triathlon: canonical snapshot test plus processed unmapped-row test.
@@ -48,7 +57,12 @@ An out-of-order or future checkpoint remains raw/auditable but does not advance 
 - I: wrong-contest reads are rejected and retained in raw evidence: rejection test.
 - J: reads outside event windows are rejected: historical and post-event tests.
 - K: an official final read is not overwritten by a lower-priority later read: canonical read-selection test.
+- L: Swim 700 m and Swim Finish on one physical mat resolve by Feibot pass 1 and pass 2.
+- M: four bike crossings on one physical mat resolve to Bike Loop 1, Loop 2, Loop 3, and Bike Finish without finishing the race.
+- N: the shared Run Split/Run Finish mat finishes only on the configured final pass.
+- O: a mobile physical-only read on a shared mat maps to no logical split until passage evidence is present.
+- P: a roster-level provider `FINISHED` value without configured final-split evidence remains on course.
 
 ## Deployment and data safety
 
-This is application logic only. It requires a server/Worker deployment for backend timing ingestion. Mobile UI code did not change, so no native rebuild is required for this fix. Existing stored records remain valid; replay/rebuild is optional for participants previously promoted by unsafe provider evidence and should be run as a non-destructive canonical recomputation from retained raw/provider data.
+This is application logic only. It requires a server/Worker deployment for backend timing ingestion and an OTA/mobile release for the tracking safeguards. Existing stored records remain valid; replay/rebuild is optional for participants previously promoted by unsafe provider evidence and should be run as a non-destructive canonical recomputation from retained raw/provider data.

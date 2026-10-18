@@ -1,0 +1,286 @@
+diff --git a/src/features/tracking/mappers.ts b/src/features/tracking/mappers.ts
+index 9926e2b..57c17bf 100644
+--- a/src/features/tracking/mappers.ts
++++ b/src/features/tracking/mappers.ts
+@@ -185,6 +185,7 @@ export type TimelineSplit = {
+   positionLabel?: string;
+   gapLabel?: string;
+   cutoffLabel?: string;
++  isRaceFinish?: boolean;
+ };
+ 
+ type ConfiguredTimingPoint = ResolvedTimingPoint & {
+@@ -2477,8 +2478,8 @@ function mapDerivedRaceTiming(
+       legId: split.legId ?? leg.id,
+     })),
+   );
+-  const splitRows =
+-    directSplitRows.length > 0 ? directSplitRows : nestedSplitRows;
++  const splitRows = (directSplitRows.length > 0 ? directSplitRows : nestedSplitRows)
++    .filter((row) => row.visible !== false && row.publicVisible !== false && row.hidden !== true && row.hideSplit !== true);
+   if (legRows.length < 2 || splitRows.length === 0) return undefined;
+ 
+   const splits: RaceSplitConfig[] = splitRows.flatMap<RaceSplitConfig>(
+@@ -2506,11 +2507,14 @@ function mapDerivedRaceTiming(
+             row.providerId,
+             row.providerCode,
+             row.splitUuid,
+-            row.timingPointId,
+-            row.timingPointUuid,
+           ]
+             .map(text)
+             .filter(Boolean),
++          providerTimingPointIds: [row.timingPointId, row.timingPointUuid]
++            .map(text)
++            .filter(Boolean),
++          passNumber: numberValue(row.passNumber ?? row.pass_number ?? row.passage ?? row.pass ?? row.lap),
++          isRaceFinish: row.isRaceFinish === true || row.isFinalRaceSplit === true || row.is_final_race_split === true,
+           aliases: Array.isArray(row.aliases)
+             ? row.aliases.map(text).filter(Boolean)
+             : [],
+diff --git a/src/features/tracking/timing/canonicalRaceFlow.ts b/src/features/tracking/timing/canonicalRaceFlow.ts
+index 68e4f3b..bc0f3c8 100644
+--- a/src/features/tracking/timing/canonicalRaceFlow.ts
++++ b/src/features/tracking/timing/canonicalRaceFlow.ts
+@@ -135,17 +135,16 @@ function splitBelongsToLeg(split: Row, leg: Row, legType: string): boolean {
+   ) === legType;
+ }
+ 
+-function fallbackSplitIdentities(value: Row): string[] {
+-  return [
+-    ...stableSplitIdentities(value),
+-    value.timing_point_id,
+-    value.timingPointId,
+-    value.providerTimingPointId,
+-  ]
++function physicalTimingPointIdentities(value: Row): string[] {
++  return [value.timing_point_id, value.timingPointId, value.providerTimingPointId]
+     .map(text)
+     .filter(Boolean);
+ }
+ 
++function timingPassNumber(value: Row): number | null {
++  return numeric(value.passNumber ?? value.pass_number ?? value.passage ?? value.pass ?? value.lap);
++}
++
+ function splitIdentity(value: Row): string {
+   const canonical = canonicalSplitKey(value);
+   if (canonical) return canonical;
+@@ -572,7 +571,8 @@ export function buildCanonicalRaceFlow(res: AthleteModalResponse): AthleteRaceTi
+     : configuredTriathlonRepair(res, configuredSplits));
+   const legs = repair?.legs ?? configuredLegs;
+   const transitions = repair?.transitions ?? configuredTransitions;
+-  const rawContestSplits = repair?.splits ?? configuredSplits;
++  const rawContestSplits = (repair?.splits ?? configuredSplits)
++    .filter((split) => split.visible !== false && split.publicVisible !== false && split.hidden !== true && split.hideSplit !== true);
+   const distanceDivisor = contestDistanceDivisor(
+     rawContestSplits.map(splitDistance),
+   );
+@@ -656,6 +656,12 @@ export function buildCanonicalRaceFlow(res: AthleteModalResponse): AthleteRaceTi
+       if (!timingByProviderId.has(providerId)) timingByProviderId.set(providerId, timing);
+     });
+   });
++  const physicalUseCounts = new Map<string, number>();
++  contestSplits.forEach((definition) => {
++    physicalTimingPointIdentities(definition).forEach((identity) => {
++      physicalUseCounts.set(identity, (physicalUseCounts.get(identity) ?? 0) + 1);
++    });
++  });
+   const timingForDefinition = (definition: Row): Row | undefined => {
+     for (const providerId of stableSplitIdentities(definition)) {
+       const exactProviderTiming = timingByProviderId.get(providerId);
+@@ -666,11 +672,16 @@ export function buildCanonicalRaceFlow(res: AthleteModalResponse): AthleteRaceTi
+       const exact = timingByCanonicalKey.get(canonical);
+       if (exact) return exact;
+     }
+-    const fallbackIds = fallbackSplitIdentities(definition);
++    const fallbackIds = physicalTimingPointIdentities(definition);
+     const fallback = fallbackIds.length === 0 ? undefined : athleteTimings.find((timing) => {
+       if (canonicalSplitKey(timing)) return false;
+-      const timingIds = fallbackSplitIdentities(timing);
+-      return fallbackIds.some((identity) => timingIds.includes(identity));
++      const timingIds = physicalTimingPointIdentities(timing);
++      const sharedIdentity = fallbackIds.find((identity) => timingIds.includes(identity));
++      if (!sharedIdentity) return false;
++      if ((physicalUseCounts.get(sharedIdentity) ?? 0) <= 1) return true;
++      const configuredPass = timingPassNumber(definition);
++      const observedPass = timingPassNumber(timing);
++      return configuredPass != null && observedPass != null && configuredPass === observedPass;
+     });
+     if (fallback) return fallback;
+     const name = upper(definition.displayName ?? definition.split_name ?? definition.name ?? definition.label);
+@@ -768,6 +779,7 @@ export function buildCanonicalRaceFlow(res: AthleteModalResponse): AthleteRaceTi
+         rank: rank(timing),
+         distanceInLegKm: distance,
+         cumulativeDistanceKm: cumulativeDistance,
++        isRaceFinish: split.isRaceFinish === true || split.is_final_race_split === true || split.isFinalRaceSplit === true,
+         status: timingStatus(timing),
+       };
+     });
+diff --git a/src/features/tracking/timing/canonicalRaceState.test.ts b/src/features/tracking/timing/canonicalRaceState.test.ts
+index cec38cf..516a1c1 100644
+--- a/src/features/tracking/timing/canonicalRaceState.test.ts
++++ b/src/features/tracking/timing/canonicalRaceState.test.ts
+@@ -2,7 +2,7 @@ import { expect, test } from 'vitest';
+ import { resolveCanonicalRaceState } from './canonicalRaceState';
+ 
+ const finishEvidence = {
+-    sections: [{ status: 'completed', rows: [{ name: 'FINISH', status: 'accepted' }] }],
++    sections: [{ status: 'completed', rows: [{ name: 'FINISH', status: 'accepted', isRaceFinish: true }] }],
+     timeline: [{ name: 'FINISH', state: 'completed' }],
+   };
+ 
+@@ -22,3 +22,10 @@ test('keeps a started athlete live while awaiting the next mat read', () => {
+   const state = resolveCanonicalRaceState({ timeline: [{ name: 'RUN START', state: 'completed' }, { name: 'FINISH', state: 'upcoming' }] });
+   expect(state).toMatchObject({ status: 'IN_PROGRESS', hasConfirmedFinish: false, showPrediction: true });
+ });
++test('does not finish because only the currently visible swim leg is completed', () => {
++  const state = resolveCanonicalRaceState({
++    resultStatus: 'STARTED',
++    sections: [{ status: 'completed', rows: [{ name: 'SWIM FINISH', key: 'swim_finish', status: 'official' }] }],
++  });
++  expect(state).toMatchObject({ status: 'IN_PROGRESS', hasConfirmedFinish: false, showPrediction: true });
++});
+diff --git a/src/features/tracking/timing/canonicalRaceState.ts b/src/features/tracking/timing/canonicalRaceState.ts
+index faa92d7..df7a1a8 100644
+--- a/src/features/tracking/timing/canonicalRaceState.ts
++++ b/src/features/tracking/timing/canonicalRaceState.ts
+@@ -5,12 +5,13 @@ export type CanonicalRaceStateInput = {
+   terminalStatus?: string | null;
+   sections?: ReadonlyArray<{
+     status?: string | null;
+-    rows?: ReadonlyArray<{ name?: string | null; key?: string | null; status?: string | null }>;
++    rows?: ReadonlyArray<{ name?: string | null; key?: string | null; status?: string | null; isRaceFinish?: boolean }>;
+   }>;
+   timeline?: ReadonlyArray<{
+     name?: string | null;
+     splitLabel?: string | null;
+     state?: string | null;
++    isRaceFinish?: boolean;
+   }>;
+ };
+ 
+@@ -41,18 +42,19 @@ export function resolveCanonicalRaceState(input: CanonicalRaceStateInput): Canon
+   const sections = input.sections ?? [];
+   const rows = sections.flatMap((section) => section.rows ?? []);
+   const timeline = input.timeline ?? [];
+-  const finalSectionCompleted = sections.length > 0 && normalized(sections.at(-1)?.status) === "completed";
+   // Only the final configured checkpoint can complete the race. Looking for
+   // any label containing "finish" promotes Swim Finish/Bike Finish too early.
+   const finalConfiguredRow = rows.at(-1);
+   const finalTimelineRow = timeline.at(-1);
+   const finishedBySplit = Boolean(
+     (finalConfiguredRow
+-      && isFinishName(`${finalConfiguredRow.name ?? ""} ${finalConfiguredRow.key ?? ""}`)
++      // Configured course rows must explicitly identify the one race finish.
++      // Labels such as Swim Finish and Bike Finish are leg boundaries only.
++      && finalConfiguredRow.isRaceFinish === true
+       && isConfirmed(finalConfiguredRow.status))
+     || (!finalConfiguredRow
+       && finalTimelineRow
+-      && isFinishName(`${finalTimelineRow.name ?? ""} ${finalTimelineRow.splitLabel ?? ""}`)
++      && (finalTimelineRow.isRaceFinish === true || isFinishName(`${finalTimelineRow.name ?? ""} ${finalTimelineRow.splitLabel ?? ""}`))
+       && isConfirmed(finalTimelineRow.state)),
+   );
+   // Result status is a compatibility fallback only when canonical course rows
+@@ -62,7 +64,7 @@ export function resolveCanonicalRaceState(input: CanonicalRaceStateInput): Canon
+     && /finish|complete/.test(normalized(input.resultStatus));
+   const terminal = [input.terminalStatus, input.resultStatus]
+     .some(value => /^(?:CUTOFF_PENDING|NO FINISH TIME|DNF|DNS|DNQ|DSQ)\b/.test(normalized(value).toUpperCase()));
+-  const hasConfirmedFinish = !terminal && (finishedByResult || finalSectionCompleted || finishedBySplit);
++  const hasConfirmedFinish = !terminal && (finishedByResult || finishedBySplit);
+   const hasConfirmedTimingRead =
+     rows.some((row) => isConfirmed(row.status)) ||
+     timeline.some((row) => isConfirmed(row.state));
+diff --git a/src/features/tracking/timing/raceSections.ts b/src/features/tracking/timing/raceSections.ts
+index f87a688..cba32dc 100644
+--- a/src/features/tracking/timing/raceSections.ts
++++ b/src/features/tracking/timing/raceSections.ts
+@@ -26,6 +26,11 @@ export type RaceSplitConfig = {
+   distanceInLegKm?: number | null;
+   order: number;
+   providerIds?: string[];
++  /** Physical mat IDs are separate because several logical splits may share one. */
++  providerTimingPointIds?: string[];
++  /** Feibot pass/use number for a shared physical timing point. */
++  passNumber?: number | null;
++  isRaceFinish?: boolean;
+   aliases?: string[];
+   passRule?: "first" | "last" | "official";
+ };
+@@ -54,6 +59,7 @@ export type RaceSectionRow = {
+   /** Athlete-facing distance inside the current sport leg. */
+   distanceInLegKm?: number | null;
+   cumulativeDistanceKm?: number | null;
++  isRaceFinish?: boolean;
+   status: NormalizedTimingRead["status"];
+ };
+ 
+@@ -189,14 +195,30 @@ export function normalizeTimingReads(
+       Boolean(item) && typeof item === "object" && !Array.isArray(item),
+   );
+   const result = new Map<string, NormalizedTimingRead>();
++  const physicalUseCounts = new Map<string, number>();
++  for (const split of configuredSplits) {
++    for (const identity of split.providerTimingPointIds ?? []) {
++      const key = normalizeTimingKey(identity);
++      if (key) physicalUseCounts.set(key, (physicalUseCounts.get(key) ?? 0) + 1);
++    }
++  }
+   for (const split of configuredSplits) {
+     const identities = new Set(configuredIdentityValues(split));
+     const exactProviderIds = new Set(
+       (split.providerIds ?? []).map(normalizeTimingKey).filter(Boolean),
+     );
++    const physicalIds = new Set(
++      (split.providerTimingPointIds ?? []).map(normalizeTimingKey).filter(Boolean),
++    );
+     const matches = reads.filter((read) => {
+       const values = readIdentityValues(read);
+       if (values.some((value) => exactProviderIds.has(value))) return true;
++      const matchedPhysical = values.find((value) => physicalIds.has(value));
++      if (matchedPhysical) {
++        if ((physicalUseCounts.get(matchedPhysical) ?? 0) <= 1) return true;
++        const readPass = Number(read.passNumber ?? read.pass_number ?? read.passage ?? read.pass ?? read.lap);
++        return split.passNumber != null && Number.isFinite(readPass) && readPass === split.passNumber;
++      }
+       return values.some((value) => identities.has(value));
+     });
+     const selected = selectDuplicateRead(matches, split.passRule);
+@@ -351,6 +373,7 @@ export function buildAthleteRaceSections(args: {
+           overallElapsedSeconds: read?.elapsedSeconds ?? null,
+           timeOfDay: read?.timeOfDay ?? read?.timestamp ?? null,
+           metric: metricForSegment(leg.type, splitDuration, distance),
++          isRaceFinish: split.isRaceFinish === true,
+           status: read?.status ?? "missing",
+         };
+         previousSplit = split;
+diff --git a/src/features/tracking/timing/sharedPhysicalMat.test.ts b/src/features/tracking/timing/sharedPhysicalMat.test.ts
+new file mode 100644
+index 0000000..30d36e8
+--- /dev/null
++++ b/src/features/tracking/timing/sharedPhysicalMat.test.ts
+@@ -0,0 +1,23 @@
++import { expect, test } from 'vitest';
++import { normalizeTimingReads, type RaceSplitConfig } from './raceSections';
++
++const splits: RaceSplitConfig[] = [
++  { key: 'swim_700', name: 'Swim 700 m', legId: 'swim', order: 1, providerTimingPointIds: ['MAT-1'], passNumber: 1 },
++  { key: 'swim_finish', name: 'Swim Finish', legId: 'swim', order: 2, providerTimingPointIds: ['MAT-1'], passNumber: 2 },
++];
++
++test('does not reuse one ambiguous physical-mat read for every logical split', () => {
++  const result = normalizeTimingReads(splits, [{ timingPointId: 'MAT-1', elapsedSeconds: 900, status: 'valid' }]);
++  expect([...result.keys()]).toEqual([]);
++});
++
++test('maps shared physical-mat reads only with Feibot pass numbers', () => {
++  const result = normalizeTimingReads(splits, [
++    { timingPointId: 'MAT-1', passNumber: 1, elapsedSeconds: 900, status: 'valid' },
++    { timingPointId: 'MAT-1', passNumber: 2, elapsedSeconds: 1800, status: 'valid' },
++  ]);
++  expect([...result.entries()].map(([key, read]) => [key, read.elapsedSeconds])).toEqual([
++    ['swim_700', 900],
++    ['swim_finish', 1800],
++  ]);
++});

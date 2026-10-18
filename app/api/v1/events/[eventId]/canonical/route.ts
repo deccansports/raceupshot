@@ -1,6 +1,7 @@
 import { platformFailure, platformSuccess } from "@/lib/platform-api-response";
-import { getPlatformEvent } from "@/lib/platform-repository";
+import { getPlatformEvent, sanitizePublicParticipantSplits } from "@/lib/platform-repository";
 import { canonicalManifestUpdatedAt, getCanonicalLiveEvent } from "@/lib/canonical-live-tracking";
+import { getLiveTrackingHubConfig } from "@/lib/live-tracking-hub-config";
 
 export const dynamic = "force-dynamic";
 
@@ -11,9 +12,17 @@ export async function GET(_request: Request, { params }: { params: Promise<{ eve
     const { eventId } = await params;
     const event = await getPlatformEvent(eventId);
     if (!event) return platformFailure("EVENT_NOT_FOUND", "Event not found", 404);
-    const canonical = await getCanonicalLiveEvent(event.eventId);
+    const [canonical, timingConfiguration] = await Promise.all([
+      getCanonicalLiveEvent(event.eventId),
+      getLiveTrackingHubConfig(event.eventId),
+    ]);
     if (!canonical) return platformFailure("CANONICAL_LIVE_DATA_NOT_READY", "A complete canonical live build is not available yet.", 404);
-    return platformSuccess(canonical, {
+    const publicCanonical = {
+      ...canonical,
+      participants: canonical.participants.map((participant) => sanitizePublicParticipantSplits(participant, timingConfiguration)),
+      leaderboard: canonical.leaderboard.map((participant) => sanitizePublicParticipantSplits(participant, timingConfiguration)),
+    };
+    return platformSuccess(publicCanonical, {
       eventId: event.eventId,
       lastUpdatedAt: canonicalManifestUpdatedAt(canonical.manifest),
       source: "timing-provider",

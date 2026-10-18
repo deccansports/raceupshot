@@ -342,6 +342,7 @@ function splitState(
     name: split.displayName,
     legType: split.legType,
     order: split.order,
+    publicVisible: split.publicVisible !== false,
     legDistanceKm: split.distanceInLegKm,
     cumulativeRaceDistanceKm: split.cumulativeDistanceKm,
     distanceKm: split.cumulativeDistanceKm,
@@ -594,7 +595,12 @@ export function resolveCanonicalAthleteState(
     ? cutoffFailure?.seconds ?? snapshot.raceState.elapsedAtResolution ?? null
     : null;
   const isTerminalStatus = status === 'FINISHED' || status === 'DNF' || status === 'DNS' || status === 'DSQ';
-  const nextDefinition = isTerminalStatus ? null : ordered[lastIndex + 1] ?? null;
+  // Hidden checkpoints remain canonical evidence, but public progress and ETA
+  // always target the next visible logical checkpoint. Consecutive hidden
+  // splits are skipped without deleting their reads or distances.
+  const nextDefinition = isTerminalStatus
+    ? null
+    : ordered.slice(lastIndex + 1).find((split) => split.publicVisible !== false) ?? null;
   const sectionResolution = resolveCurrentRaceSection(
     configuredRaceSections(contest).map((section) => ({
       key: section.key,
@@ -1098,6 +1104,7 @@ function buildSplitRows(snapshot: CanonicalAthleteSnapshot, contest: CanonicalCo
       splitKey: split.key,
       displayName: split.displayName,
       legType: split.legType,
+      publicVisible: split.publicVisible !== false,
       status: read?.status ?? 'missing',
       readAt,
       timeOfDay: readAt

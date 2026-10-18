@@ -13,8 +13,9 @@ import { applyParticipantRegistrationEnrichment } from "./participant-roster-imp
 import { getAdminEventCourseMaps } from "./course-maps";
 import { ensureFeibotLiveSyncSchedule } from "./feibot-live-sync-scheduler";
 import { feibotAccessDeniedRetryAt, feibotCooldownUntil, feibotRetryDelayMilliseconds, isFeibotCooldownActive, parseRetryAfterMilliseconds } from "./feibot-rate-limit";
-import { storeFeibotProcessedTimingAudits } from "./feibot-timing-processing";
+import { reevaluateEventTimingCutoffs, storeFeibotProcessedTimingAudits } from "./feibot-timing-processing";
 import { resolveConfiguredFinishers } from "./live-leaderboard";
+import { timingProviderError, type TimingProviderOutcome } from "./timing-provider-response";
 
 const PREFIX = "raceupshot";
 const DEFAULT_BASE_URL = "https://apicn.feibot.com";
@@ -494,7 +495,17 @@ async function hmacSha256Hex(secret: string, value: string): Promise<string> {
 async function callFeibot(
   credentials: ResolvedFeibotCredentials,
   path: string,
-): Promise<{ ok: boolean; status: number; data: unknown; message: string; retryAfterMilliseconds: number | null }> {
+): Promise<{
+  ok: boolean;
+  status: number;
+  data: unknown;
+  message: string;
+  retryAfterMilliseconds: number | null;
+  retryable: boolean;
+  providerCode: string | null;
+  providerType: string | null;
+  outcome: TimingProviderOutcome;
+}> {
   const timestamp = Math.floor(Date.now() / 1000).toString();
   const query = `event_uuid=${credentials.eventUuid}`;
   const signature = await hmacSha256Hex(
@@ -525,13 +536,19 @@ async function callFeibot(
       data = null;
     }
     const record = asRecord(data);
-    const providerMessage = text(record?.message ?? record?.msg);
+    const embeddedError = timingProviderError(data, response.status);
+    const providerMessage = embeddedError?.displayMessage || text(record?.message ?? record?.msg);
+    const informationalOutcome = embeddedError?.outcome === "no_results" || embeddedError?.outcome === "not_modified";
     return {
-      ok: response.ok,
-      status: response.status,
+      ok: response.ok && (!embeddedError || informationalOutcome),
+      status: embeddedError && !informationalOutcome ? embeddedError.status : response.status,
       data,
       message: providerMessage || (response.ok ? "Connected" : `Feibot returned HTTP ${response.status}`),
       retryAfterMilliseconds: parseRetryAfterMilliseconds(response.headers.get("Retry-After")),
+      retryable: embeddedError?.retryable ?? (response.status === 429 || response.status >= 500),
+      providerCode: embeddedError?.code ?? null,
+      providerType: embeddedError?.type ?? null,
+      outcome: embeddedError?.outcome ?? (response.ok ? "data" : "error"),
     };
   } catch (error) {
     return {
@@ -540,13 +557,17 @@ async function callFeibot(
       data: null,
       message: error instanceof Error ? error.message : "Unable to reach Feibot.",
       retryAfterMilliseconds: null,
+      retryable: true,
+      providerCode: null,
+      providerType: null,
+      outcome: "error",
     };
   }
 }
 
 async function callFeibotWithRateLimitRetry(credentials: ResolvedFeibotCredentials, path: string) {
   let response = await callFeibot(credentials, path);
-  for (let attempt = 1; response.status === 429 && attempt < 3; attempt += 1) {
+  for (let attempt = 1; !response.ok && response.retryable && attempt < 3; attempt += 1) {
     await new Promise<void>((resolve) => setTimeout(resolve, feibotRetryDelayMilliseconds(attempt, response.retryAfterMilliseconds)));
     response = await callFeibot(credentials, path);
   }
@@ -1502,6 +1523,7 @@ export function mergeImportedFeibotSplits(
       providerContestUuid: split.providerContestUuid ?? saved.providerContestUuid ?? null,
       isFinalRaceSplit: saved.isFinalRaceSplit ?? split.isFinalRaceSplit,
       visible: saved.visible,
+      requiredForProgression: saved.requiredForProgression ?? true,
     } : split;
   });
   const customSplits = savedSplits
@@ -1892,6 +1914,7 @@ export async function syncFeibotLiveResults(eventId: string) {
         continue;
       }
       successfulFeeds += 1;
+      if (feed.response.outcome === "not_modified" || feed.response.outcome === "no_results") continue;
       const payload = await resolveDownloadedPayload(feed.response.data).catch(() => feed.response.data);
       readableRows.push(deepResponseRows(payload, "results", "process", "participants", "athletes", "rows", "data"));
       await kv.put(`${scopedProviderPrefix(event.id, credentialRecord.resolved.eventUuid)}:${feed.storage}`, JSON.stringify(payload));
@@ -1921,6 +1944,11 @@ export async function syncFeibotLiveResults(eventId: string) {
       if (published) publishedConnections += 1;
     }
   }
+  // The Durable Object invokes this sync on its own alarm. Re-evaluate time-
+  // based status even when Feibot returned no changed rows, was rate limited,
+  // or no spectator/admin client is connected.
+  const cutoffSweep = await reevaluateEventTimingCutoffs({ eventId: event.id, now: new Date().toISOString() });
+  if (cutoffSweep.published) publishedConnections += 1;
   const state: FeibotLiveSyncState = {
     lastAttemptAt,
     lastSuccessAt: successfulConnections ? new Date().toISOString() : previousState?.lastSuccessAt ?? null,

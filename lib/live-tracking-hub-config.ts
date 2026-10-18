@@ -39,7 +39,10 @@ export type HubSplit = {
   /** The one logical split that completes this contest. Never inferred from the physical mat name. */
   isFinalRaceSplit?: boolean;
   importedName?: string | null;
+  /** Public presentation only. Hidden reads remain stored and auditable. */
   visible?: boolean;
+  /** Independent course/safety requirement. Legacy configs remain mandatory. */
+  requiredForProgression?: boolean;
 };
 
 /**
@@ -54,13 +57,22 @@ export function normalizeFinalRaceSplits(splits: HubSplit[]): HubSplit[] {
     scopes.set(scope, [...(scopes.get(scope) ?? []), split]);
   }
   const finalIds = new Set<string>();
-  for (const rows of scopes.values()) {
+  for (const [scope, rows] of scopes) {
     const ordered = [...rows].sort((left, right) => left.order - right.order);
     const explicit = ordered.filter((split) => split.isFinalRaceSplit === true);
-    const final = explicit.length === 1 ? explicit[0] : explicit.length === 0 ? ordered.at(-1) : null;
+    if (explicit.length > 1) {
+      throw new Error(`Race flow ${scope} has multiple final race splits. Select exactly one final logical checkpoint.`);
+    }
+    if (explicit.length === 1 && explicit[0]?.id !== ordered.at(-1)?.id) {
+      throw new Error(`Race flow ${scope} must use its last configured logical checkpoint as the final race split.`);
+    }
+    const final = explicit[0] ?? ordered.at(-1);
     if (final) finalIds.add(final.id);
   }
-  return splits.map((split) => ({ ...split, isFinalRaceSplit: finalIds.has(split.id) }));
+  return splits.map((split) => ({
+    ...split,
+    isFinalRaceSplit: finalIds.has(split.id),
+  }));
 }
 export type LiveTrackingHubConfig = {
   eventId: string;
@@ -191,6 +203,10 @@ export async function getLiveTrackingHubConfig(eventIdOrSlug: string): Promise<L
       providerContestUuid: split.providerContestUuid ?? null,
       importedName: split.importedName ?? null,
       visible: split.visible ?? true,
+      // Before this flag existed every configured checkpoint participated in
+      // course validation. Preserve that behaviour when upgrading old data;
+      // public visibility must never silently change the timing requirement.
+      requiredForProgression: split.requiredForProgression ?? true,
     }))),
     timingPoints: (stored.timingPoints ?? []).map((point) => ({
       ...point,

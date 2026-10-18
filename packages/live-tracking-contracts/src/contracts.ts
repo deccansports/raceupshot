@@ -240,6 +240,8 @@ export interface CanonicalSplit {
   readSelectionRule: CanonicalReadSelectionRule | null;
   passNumber: number | null;
   rankingEnabled: boolean;
+  /** Public presentation flag. Hidden reads remain canonical and auditable. */
+  publicVisible?: boolean;
   required: boolean;
   /** True only for the first official split of the race. */
   isRaceStart?: boolean;
@@ -466,6 +468,7 @@ export interface CanonicalSplitRow {
   splitKey: string;
   displayName: string;
   legType: CanonicalLegType;
+  publicVisible?: boolean;
   status: CanonicalTimingStatus;
   readAt: string | null;
   timeOfDay: string | null;
@@ -492,6 +495,7 @@ export interface CanonicalResolvedSplitState {
   name: string;
   legType: CanonicalLegType;
   order: number;
+  publicVisible?: boolean;
   /** Distance measured inside this sport leg (used for GPX and leg pace). */
   legDistanceKm: number;
   /** Distance from the beginning of the complete race. */
@@ -1029,6 +1033,7 @@ export interface CanonicalSplitMappingInput {
   readSelectionRule?: CanonicalReadSelectionRule;
   passNumber?: number;
   rankingEnabled?: boolean;
+  publicVisible?: boolean;
   required?: boolean;
   timingPointType?: CanonicalTimingPointType;
   startDetectionEnabled?: boolean;

@@ -251,4 +251,42 @@ describe("Feibot passage and sequence engine", () => {
       0, 1_800_000, 120_000, 3_600_000, 120_000, 2_400_000,
     ]);
   });
+
+  it("keeps every shared-mat swim, bike and run passage on its imported logical split", () => {
+    const sequence: TimingEngineConfiguration["sequence"] = [
+      { timingPointKey: "swim_start", timingPointUuid: "START", name: "Swim Start", type: "START", order: 1, passage: 1, readerUuids: ["START"] },
+      { timingPointKey: "swim_700", timingPointUuid: "SWIM", name: "Swim 700 m", type: "SPLIT", order: 2, passage: 1, readerUuids: ["SWIM"] },
+      { timingPointKey: "swim_finish", timingPointUuid: "SWIM", name: "Swim Finish", type: "SPLIT", order: 3, passage: 2, readerUuids: ["SWIM"] },
+      { timingPointKey: "bike_1", timingPointUuid: "BIKE", name: "Bike Loop 1", type: "SPLIT", order: 4, passage: 1, readerUuids: ["BIKE"] },
+      { timingPointKey: "bike_2", timingPointUuid: "BIKE", name: "Bike Loop 2", type: "SPLIT", order: 5, passage: 2, readerUuids: ["BIKE"] },
+      { timingPointKey: "bike_3", timingPointUuid: "BIKE", name: "Bike Loop 3", type: "SPLIT", order: 6, passage: 3, readerUuids: ["BIKE"] },
+      { timingPointKey: "bike_finish", timingPointUuid: "BIKE", name: "Bike Finish", type: "SPLIT", order: 7, passage: 4, readerUuids: ["BIKE"] },
+      { timingPointKey: "run_1", timingPointUuid: "RUN", name: "Run Split 1", type: "SPLIT", order: 8, passage: 1, readerUuids: ["RUN"] },
+      { timingPointKey: "run_finish", timingPointUuid: "RUN", name: "Run Finish", type: "FINISH", order: 9, passage: 2, readerUuids: ["RUN"] },
+    ];
+    const at = (id: string, point: string, minutes: number) => read(id, point, new Date(Date.parse("2026-08-07T07:00:00.000Z") + minutes * 60_000).toISOString());
+    const allReads = [
+      at("start", "START", 1), at("swim-700", "SWIM", 15), at("swim-finish", "SWIM", 31),
+      at("bike-1", "BIKE", 60), at("bike-2", "BIKE", 90), at("bike-3", "BIKE", 120), at("bike-finish", "BIKE", 150),
+      at("run-1", "RUN", 175), at("run-finish", "RUN", 200),
+    ];
+    const config = {
+      ...configuration,
+      gunStartTimestamp: "2026-08-07T07:00:00.000Z",
+      startWindowOpenTimestamp: "2026-08-07T07:00:00.000Z",
+      startWindowCloseTimestamp: "2026-08-07T08:00:00.000Z",
+      eventEndTimestamp: "2026-08-07T13:00:00.000Z",
+      sequence,
+    };
+
+    expect(processFeibotAthleteTiming({ configuration: config, rawReads: allReads.slice(0, 3) })).toMatchObject({
+      state: "WAITING_FOR_SPLIT_3",
+      officialResults: [{ timingPointKey: "swim_start" }, { timingPointKey: "swim_700" }, { timingPointKey: "swim_finish" }],
+    });
+    expect(processFeibotAthleteTiming({ configuration: config, rawReads: allReads.slice(0, 7) }).state).toBe("WAITING_FOR_SPLIT_7");
+    expect(processFeibotAthleteTiming({ configuration: config, rawReads: allReads.slice(0, 8) }).state).toBe("WAITING_FOR_FINISH");
+    const finished = processFeibotAthleteTiming({ configuration: config, rawReads: allReads });
+    expect(finished.state).toBe("FINISHED");
+    expect(finished.officialResults.map((row) => row.timingPointKey)).toEqual(sequence.map((point) => point.timingPointKey));
+  });
 });

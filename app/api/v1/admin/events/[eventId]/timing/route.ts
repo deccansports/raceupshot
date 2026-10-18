@@ -17,6 +17,7 @@ const rawReadSchema = z.object({
   bib: z.string().max(50),
   chipCode: z.string().min(1).max(150),
   timingPointUuid: z.string().min(1).max(150),
+  passage: z.number().int().min(1).max(100).nullable().optional(),
   readerUuid: z.string().min(1).max(150),
   antennaId: z.string().max(100).nullable(),
   rssi: z.number().finite().nullable(),
