@@ -20,6 +20,60 @@ Please review and integrate branch `feature/live-timing-bergman-sync` from
   Bergtecno template, AiSensy campaign, event switches, and server-side live
   sending flag are configured.
 
+## Canonical live tracking and Feibot synchronization
+
+Bergman must implement the same canonical-first data path. Web and mobile must
+not render directly from a raw Feibot response once a canonical version exists.
+
+1. A per-event durable scheduler requests Feibot updates.
+2. Provider rows are normalized against the saved contest, split, passage,
+   athlete, and timing-point mappings.
+3. Accepted changes are written as an immutable/version-pinned canonical event
+   plus participant projections.
+4. A canonical change event is published only after the write completes.
+5. Connected clients invalidate the affected athlete, participant, leaderboard,
+   and active-version queries from that event.
+6. HTTP polling remains a bounded recovery path when the stream is unavailable.
+
+The current Race Upshot production cadence is:
+
+- scheduler wake-up: every **60 seconds**;
+- Feibot temporary/live result feed: due every **60 seconds**;
+- Feibot final-result feed: due every **5 minutes**;
+- participant/roster reconciliation: every **5 minutes**;
+- canonical publish after a successful fetch: immediate in the same sync job;
+- canonical WebSocket notification after the write: immediate;
+- selected-athlete canonical recovery polling: every **10 seconds**;
+- event participant canonical recovery polling: every **30 seconds**;
+- mobile live leaderboard polling: every **5 seconds**;
+- general mobile tracking polling: every **12 seconds**;
+- displayed live clocks/interpolation: every **1 second**, calculated locally
+  from the last accepted canonical timing anchor.
+
+Therefore, under normal conditions a new Feibot split should reach Race Upshot
+on the next 60-second provider cycle, followed by canonical publication and an
+immediate stream invalidation. This is not a guaranteed 10-second Feibot fetch:
+the 10-second interval is only the selected-athlete recovery poll after data is
+already canonical.
+
+Feibot protection must also be retained:
+
+- provider result feeds are requested sequentially, never as a burst;
+- retryable failures receive at most two retries after the initial request;
+- without `Retry-After`, retry delays are 5 seconds and then 10 seconds;
+- HTTP 429 enters a minimum 2-minute persisted cooldown, or longer when Feibot
+  supplies a bounded `Retry-After` value;
+- HTTP 401/403 on an optional feed backs off for 15 minutes;
+- failed, denied, empty, or rate-limited reads preserve the last valid canonical
+  version and must never clear or regress athlete timing;
+- a newer accepted canonical correction may retract an incorrect earlier split
+  or finish and must update clients without restarting the app.
+
+Bergman acceptance logging should record provider request time, provider response
+time, canonical write completion time, stream receipt time, and UI render time.
+This allows measurement of provider-to-canonical and canonical-to-client latency
+without confusing the one-second display clock with provider synchronization.
+
 ## Mobile application
 
 The configured mobile Git remote was unavailable during handoff. Apply the
