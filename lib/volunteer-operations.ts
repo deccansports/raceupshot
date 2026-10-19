@@ -1,6 +1,9 @@
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import type { KVNamespace } from "@cloudflare/workers-types";
 import { getLiveTrackingHubConfig } from "./live-tracking-hub-config";
+import { getCanonicalLiveParticipant } from "./canonical-live-tracking";
+import { resolveManualTimingStart } from "./manual-timing-start";
+import { latestResettableTimingId } from "./manual-timing-reset";
 import { getBikeRackConfiguration } from "./bike-racks";
 import { assignedBikeRack } from "./bike-rack-ranges";
 import { calculateVolunteerOperationCounters } from "./volunteer-operation-counters";
@@ -30,10 +33,15 @@ import { dispatchCounterNotifications, readCounterTemplate, scheduleCounterNotif
 import { signedWaiverConfirmationEmail } from './waiver-confirmation-email';
 import { createVolunteerWaiverCheckInRecord, type RelayWaiverTeam } from './signed-waivers';
 import { sendBergtecnoEmail } from './bergtecno-email';
+import { normalizeAiSensyPhone, sendAiSensyOtpWhatsApp } from './aisensy-whatsapp';
 import { effectiveVolunteerWaiverVerifiedAt } from './volunteer-check-in-state';
 import { getFeibotContestGunStarts, resolveFeibotContestGunStart } from './feibot-integration';
 import { validateConsolidatedWaiverSelection } from './multiple-registrations';
 import { isRelayCyclistRole, relayBikeGroupKey } from './relay-bike';
+import { findRfidInventoryChip } from './rfid-encoder-repository';
+import { isReaderLikeEpc, rfidReaderAssignmentValue } from './rfid-reader-assignment';
+import { eventHasWaiverIntent } from './event-waiver-policy';
+import type { ChipReturnMethod, ChipReturnStatus } from './chip-return';
 
 const VOLUNTEER_CHECKIN_OTP_TEMPLATE_ID = '4816d386-8040-42d6-b2c9-c08a803c6f49';
 
@@ -60,6 +68,14 @@ export interface VolunteerParticipantState {
   checkedInAt: string | null;
   bikeCheckedInAt: string | null;
   bikeCheckedOutAt: string | null;
+  assignedChipCodeAtCheckout?: string | null;
+  returnedChipCode?: string | null;
+  returnedChipFullEpc?: string | null;
+  chipReturnStatus?: ChipReturnStatus;
+  chipReturnMethod?: ChipReturnMethod | null;
+  chipReturnReason?: string | null;
+  chipReturnedAt?: string | null;
+  bikeCheckoutTransactionId?: string | null;
   helmetChecked: boolean;
   bikeRack: string | null;
   medalIssuedAt: string | null;
@@ -173,6 +189,14 @@ function emptyState(): VolunteerParticipantState {
     checkedInAt: null,
     bikeCheckedInAt: null,
     bikeCheckedOutAt: null,
+    assignedChipCodeAtCheckout: null,
+    returnedChipCode: null,
+    returnedChipFullEpc: null,
+    chipReturnStatus: "PENDING_RETURN",
+    chipReturnMethod: null,
+    chipReturnReason: null,
+    chipReturnedAt: null,
+    bikeCheckoutTransactionId: null,
     helmetChecked: false,
     bikeRack: null,
     medalIssuedAt: null,
@@ -408,6 +432,18 @@ function applyRegistrationIdentityReset(state: VolunteerParticipantState, resetA
   };
 }
 
+export function applyWaiverAsCheckIn(
+  state: VolunteerParticipantState,
+  registrationVerifiedAt?: string | null,
+): VolunteerParticipantState {
+  const waiverVerifiedAt = effectiveVolunteerWaiverVerifiedAt(state, registrationVerifiedAt);
+  return {
+    ...state,
+    waiverVerifiedAt,
+    checkedInAt: state.checkedInAt || waiverVerifiedAt,
+  };
+}
+
 async function roster(eventId: string): Promise<RosterParticipant[]> {
   const event = await getEventBySlug(eventId, { includeUnpublished: true });
   if (!event) throw new Error("Event not found.");
@@ -437,7 +473,8 @@ export async function searchVolunteerParticipants(input: {
   const event = await getEventBySlug(input.eventId, { includeUnpublished: true });
   if (!event) throw new Error("Event not found.");
   const term = normalizeScan(input.query).toLowerCase();
-  if (term.length < 1) return { event: { id: event.id, name: event.name, waiverRequired: Boolean(event.waiverHtml), waiverVersion: event.waiverVersion || "", waiverPolicy: event.waiverPolicy }, participants: [], participantProfiles: [] };
+  const waiverRequired = assignment.modules.includes("WAIVER_CHECK_IN") || eventHasWaiverIntent(event);
+  if (term.length < 1) return { event: { id: event.id, name: event.name, waiverRequired, waiverVersion: event.waiverVersion || "", waiverPolicy: event.waiverPolicy }, participants: [], participantProfiles: [] };
   const [eventRoster, rackConfiguration] = await Promise.all([roster(event.id), input.includeBikeRack ? getBikeRackConfiguration(event.id) : Promise.resolve(null)]);
   const directMatches = eventRoster.filter((participant) => volunteerParticipantMatchesSearch(participant, term, input.searchMode));
   const matchedRelayTeams = new Set(directMatches.filter((participant) => participant.participationMode === "RELAY" && participant.relayTeamId).map((participant) => participant.relayTeamId));
@@ -462,12 +499,17 @@ export async function searchVolunteerParticipants(input: {
   const historyStates = applyWaiverResetHistory(statePayload.states ?? {}, waiverHistory);
   const participantStates = Object.fromEntries(candidates.map((participant) => [
     participant.id,
-    applyRegistrationIdentityReset({ ...emptyState(), ...historyStates[participant.id] }, participant.registrationWaiverResetAt),
+    applyWaiverAsCheckIn(
+      applyRegistrationIdentityReset({ ...emptyState(), ...historyStates[participant.id] }, participant.registrationWaiverResetAt),
+      participant.registrationWaiverVerifiedAt,
+    ),
   ]));
   const states = projectRelayBikeStates(candidates, participantStates);
   const participants = candidates.map(({ registrationWaiverVerifiedAt: registeredWaiver, registrationWaiverResetAt: registeredReset, ...participant }) => {
-      const state = applyRegistrationIdentityReset({ ...emptyState(), ...states[participant.id] }, registeredReset);
-      state.waiverVerifiedAt = effectiveVolunteerWaiverVerifiedAt(state, registeredWaiver);
+      const state = applyWaiverAsCheckIn(
+        applyRegistrationIdentityReset({ ...emptyState(), ...states[participant.id] }, registeredReset),
+        registeredWaiver,
+      );
       const configuredRack = rackConfiguration ? assignedBikeRack(participant.bib, rackConfiguration.ranges) : null;
       // Older installed volunteer builds render state.bikeRack before the newer
       // assignedBikeRack field. Project the configured range into the response
@@ -520,7 +562,7 @@ export async function searchVolunteerParticipants(input: {
     profiles.set(participant.participantId, profile);
   }
   return {
-    event: { id: event.id, name: event.name, waiverRequired: Boolean(event.waiverHtml), waiverVersion: event.waiverVersion || "", waiverPolicy: event.waiverPolicy },
+    event: { id: event.id, name: event.name, waiverRequired, waiverVersion: event.waiverVersion || "", waiverPolicy: event.waiverPolicy },
     participants,
     participantProfiles: [...profiles.values()],
   };
@@ -543,6 +585,12 @@ export interface VolunteerOperationsOverviewLog {
   capturedAt: string;
   status: string;
   bikeRack: string | null;
+  assignedChipCode?: string | null;
+  returnedChipCode?: string | null;
+  chipReturnStatus?: string | null;
+  chipReturnMethod?: string | null;
+  chipReturnReason?: string | null;
+  bikeCheckoutTransactionId?: string | null;
 }
 
 export interface VolunteerOperationsOverview {
@@ -560,6 +608,11 @@ export interface VolunteerOperationsOverview {
   remainingToAssign: number;
   chipsAssignedToBikeEntries: number;
   remainingToAssignFromBikeEntries: number;
+  chipsExpectedAtCheckout: number;
+  chipsReturnedAtCheckout: number;
+  chipsNotReturnedAtCheckout: number;
+  checkoutWithoutAssignedChip: number;
+  pendingChipReturns: number;
   checkInLogs: VolunteerOperationsOverviewLog[];
   bikeCheckInLogs: VolunteerOperationsOverviewLog[];
   bikeCheckOutLogs: VolunteerOperationsOverviewLog[];
@@ -582,7 +635,10 @@ async function participantStatesForEvent(eventId: string, participants: RosterPa
   const resetStates = applyWaiverResetHistory(states, await eventWaiverHistory(eventId));
   return projectRelayBikeStates(participants, Object.fromEntries(participants.map((participant) => [
     participant.id,
-    applyRegistrationIdentityReset({ ...emptyState(), ...resetStates[participant.id] }, participant.registrationWaiverResetAt),
+    applyWaiverAsCheckIn(
+      applyRegistrationIdentityReset({ ...emptyState(), ...resetStates[participant.id] }, participant.registrationWaiverResetAt),
+      participant.registrationWaiverVerifiedAt,
+    ),
   ])));
 }
 
@@ -625,9 +681,22 @@ export async function getVolunteerOperationsOverview(input: {
       capturedAt: row.capturedAt,
       status: row.status,
       bikeRack: row.bikeRack ?? null,
+      assignedChipCode: row.assignedChipCode ?? null,
+      returnedChipCode: row.returnedChipCode ?? null,
+      chipReturnStatus: row.chipReturnStatus ?? null,
+      chipReturnMethod: row.chipReturnMethod ?? null,
+      chipReturnReason: row.chipReturnReason ?? null,
+      bikeCheckoutTransactionId: row.bikeCheckoutTransactionId ?? null,
     }));
+  const checkoutRows = participants.filter((participant) => Boolean(states[participant.id]?.bikeCheckedOutAt));
+  const activeBikeRows = participants.filter((participant) => Boolean(states[participant.id]?.bikeCheckedInAt && !states[participant.id]?.bikeCheckedOutAt));
   return {
     ...counters,
+    chipsExpectedAtCheckout: checkoutRows.filter((participant) => Boolean(participant.chipCode)).length,
+    chipsReturnedAtCheckout: checkoutRows.filter((participant) => states[participant.id]?.chipReturnStatus === "RETURNED").length,
+    chipsNotReturnedAtCheckout: checkoutRows.filter((participant) => states[participant.id]?.chipReturnStatus === "NOT_RETURNED").length,
+    checkoutWithoutAssignedChip: checkoutRows.filter((participant) => states[participant.id]?.chipReturnStatus === "NO_CHIP_ASSIGNED").length,
+    pendingChipReturns: activeBikeRows.filter((participant) => Boolean(participant.chipCode)).length,
     checkInLogs: projectLogs(["CHECK_IN", "CHECK_IN_REVERSE", "ADMIN_WAIVER_CHECK_IN_RESET", "WAIVER_VERIFY"]),
     bikeCheckInLogs: projectLogs(["BIKE_IN"]),
     bikeCheckOutLogs: projectLogs(["BIKE_OUT"]),
@@ -684,10 +753,13 @@ export async function getAdminVolunteerParticipantStates(
     return payload.states ?? {};
   }));
   const historyStates = applyWaiverResetHistory(Object.assign({}, ...payloads), await eventWaiverHistory(event.id));
-  const resetByParticipant = new Map((await roster(event.id)).map((participant) => [participant.id, participant.registrationWaiverResetAt]));
+  const rosterByParticipant = new Map((await roster(event.id)).map((participant) => [participant.id, participant]));
   return Object.fromEntries(Object.entries(historyStates).map(([participantId, state]) => [
     participantId,
-    applyRegistrationIdentityReset({ ...emptyState(), ...state }, resetByParticipant.get(participantId) ?? null),
+    applyWaiverAsCheckIn(
+      applyRegistrationIdentityReset({ ...emptyState(), ...state }, rosterByParticipant.get(participantId)?.registrationWaiverResetAt ?? null),
+      rosterByParticipant.get(participantId)?.registrationWaiverVerifiedAt,
+    ),
   ]));
 }
 
@@ -818,16 +890,8 @@ export async function listVolunteerEventCheckInSummaries(): Promise<VolunteerEve
   }
   return Promise.all([...assignedEvents].map(async ([eventId, eventName]) => {
     const participants = await roster(eventId);
-    let checkedInAthletes = 0;
-    for (let offset = 0; offset < participants.length; offset += 50) {
-      const batch = participants.slice(offset, offset + 50);
-      const response = await (await coordinator(eventId)).fetch("https://volunteer-operations.internal/states", {
-        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ participantIds: batch.map((participant) => participant.id) }),
-      });
-      const payload = await response.json<{ ok: boolean; states?: Record<string, VolunteerParticipantState> }>();
-      if (!response.ok || !payload.ok) throw new Error(`Check-in totals are unavailable for ${eventName}.`);
-      checkedInAthletes += batch.filter((participant) => Boolean(payload.states?.[participant.id]?.checkedInAt)).length;
-    }
+    const states = await participantStatesForEvent(eventId, participants);
+    const checkedInAthletes = participants.filter((participant) => Boolean(states[participant.id]?.checkedInAt)).length;
     return {
       eventId,
       eventName,
@@ -867,6 +931,11 @@ async function volunteerWaiverOtpHash(eventId: string, participantId: string, co
 function maskedEmail(email: string): string {
   const [local = "", domain = ""] = email.split("@");
   return local.slice(0, 1) + "*".repeat(Math.min(6, Math.max(2, local.length - 1))) + "@" + domain;
+}
+
+function maskedMobile(mobile: string): string {
+  const normalized = normalizeAiSensyPhone(mobile).replace(/^\+/, "");
+  return normalized ? `${"*".repeat(Math.max(0, normalized.length - 4))}${normalized.slice(-4)}` : "";
 }
 
 export function volunteerWaiverOtpVariables(name: string, code: string): Record<string, string> {
@@ -921,38 +990,83 @@ export async function requestVolunteerWaiverOtp(input: {
   eventId: string;
   participantId: string;
   registrationIds?: string[];
-}): Promise<{ sent: boolean; email: string; expiresInSeconds: number; message: string }> {
+}): Promise<{ sent: boolean; email: string; destination: string; channel: "BOTH" | "WHATSAPP" | "EMAIL"; expiresInSeconds: number; message: string }> {
   const { event, participant, registrations } = await assignedWaiverParticipant(input.profile, input.eventId, input.participantId, input.registrationIds);
   const email = participant.email?.trim().toLowerCase() || "";
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("This athlete has no valid email address in the event registration roster.");
+  const validEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+  const mobile = participant.mobile?.trim() || "";
+  const validMobile = Boolean(normalizeAiSensyPhone(mobile));
+  if (!validMobile && !validEmail) throw new Error("This athlete has no valid WhatsApp mobile number or email address in the event registration roster.");
 
   const code = secureVolunteerOtp();
   const now = Math.floor(Date.now() / 1000);
   const codeHash = await volunteerWaiverOtpHash(event.id, participant.participantId, code);
   const stub = await coordinator(event.id);
+  const statesResponse = await stub.fetch("https://volunteer-operations.internal/states", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ participantIds: registrations.map((row) => row.registrationId) }),
+  });
+  const statesPayload = await statesResponse.json<{ ok: boolean; states?: Record<string, VolunteerParticipantState> }>();
+  if (!statesResponse.ok || !statesPayload.ok) throw new Error("The athlete check-in state could not be verified.");
+  const currentStates = registrations.map((row) => applyWaiverAsCheckIn(
+    { ...emptyState(), ...statesPayload.states?.[row.registrationId] },
+    row.registrationWaiverVerifiedAt,
+  ));
+  if (currentStates.some((state) => Boolean(state.checkedInAt))) throw new Error("This registration is already checked in. Reset the check-in before requesting another waiver OTP.");
+  if (currentStates.some((state) => Boolean(state.waiverVerifiedAt || state.emailOtpVerifiedAt))) throw new Error("This registration is already checked in through its verified waiver.");
+
+  const challengeId = crypto.randomUUID();
   const createResponse = await stub.fetch("https://volunteer-operations.internal/waiver-otp/request", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ participantId: participant.participantId, registrationIds: registrations.map((row) => row.registrationId), waiverVersion: event.waiverVersion || "", volunteerId: input.profile.id, codeHash, now }),
+    body: JSON.stringify({ challengeId, participantId: participant.participantId, registrationIds: registrations.map((row) => row.registrationId), waiverVersion: event.waiverVersion || "", volunteerId: input.profile.id, codeHash, now }),
   });
   const challenge = await createResponse.json<{ ok: boolean; error?: string }>();
   if (!createResponse.ok || !challenge.ok) throw new Error(challenge.error || "The waiver OTP could not be requested.");
 
-  const delivery = await sendBergtecnoEmail({
-    recipientEmail: email,
-    templateId: VOLUNTEER_CHECKIN_OTP_TEMPLATE_ID,
-    // Provider template #31 declares the exact, case-sensitive {{OTP}} and {{NAME}} parameters.
-    variables: volunteerWaiverOtpVariables(participant.name, code),
-    singleAttempt: true,
-  });
-  const masked = maskedEmail(email);
+  const cancelChallenge = async () => {
+    await stub.fetch("https://volunteer-operations.internal/waiver-otp/cancel", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ challengeId, participantId: participant.participantId, volunteerId: input.profile.id }),
+    }).catch(() => null);
+  };
+  let whatsapp: Awaited<ReturnType<typeof sendAiSensyOtpWhatsApp>> = { accepted: false, error: "The athlete has no valid WhatsApp mobile number." };
+  let emailDelivery: Awaited<ReturnType<typeof sendBergtecnoEmail>> | null = null;
+  try {
+    [whatsapp, emailDelivery] = await Promise.all([
+      validMobile
+        ? sendAiSensyOtpWhatsApp({ recipientPhone: mobile, recipientName: participant.name, otp: code })
+        : Promise.resolve(whatsapp),
+      validEmail
+        ? sendBergtecnoEmail({
+        recipientEmail: email,
+        templateId: VOLUNTEER_CHECKIN_OTP_TEMPLATE_ID,
+        // Provider template #31 declares the exact, case-sensitive {{OTP}} and {{NAME}} parameters.
+        variables: volunteerWaiverOtpVariables(participant.name, code),
+        singleAttempt: true,
+          })
+        : Promise.resolve(null),
+    ]);
+  } catch (error) {
+    await cancelChallenge();
+    throw error;
+  }
+  if (!whatsapp.accepted && !emailDelivery?.sent) {
+    await cancelChallenge();
+    throw new Error(`The waiver OTP was not accepted by WhatsApp or email${whatsapp.error || emailDelivery?.error ? `: ${whatsapp.error || emailDelivery?.error}` : "."} The waiver remains unsigned and the athlete was not checked in.`);
+  }
+  const channel = whatsapp.accepted && emailDelivery?.sent ? "BOTH" as const : whatsapp.accepted ? "WHATSAPP" as const : "EMAIL" as const;
+  const destination = [emailDelivery?.sent ? maskedEmail(email) : "", whatsapp.accepted ? maskedMobile(mobile) : ""].filter(Boolean).join(" and ");
+  const deliveryLabel = channel === "BOTH" ? "email and WhatsApp" : channel === "WHATSAPP" ? "WhatsApp" : "email";
   return {
-    sent: delivery.sent,
-    email: masked,
+    sent: true,
+    email: validEmail ? maskedEmail(email) : "",
+    destination,
+    channel,
     expiresInSeconds: VOLUNTEER_WAIVER_OTP_SECONDS,
-    message: delivery.sent
-      ? "A six-digit check-in code was sent to " + masked + ". It expires in 5 minutes."
-      : "Email delivery could not be confirmed. If the code arrives, enter it below; otherwise request a new code after 60 seconds.",
+    message: `A six-digit waiver and check-in code was sent by ${deliveryLabel} to ${destination}. ${whatsapp.accepted ? "The athlete can use the WhatsApp copy-code button or enter it manually. " : ""}It expires in 5 minutes. Verifying the OTP signs the waiver and completes check-in.`,
   };
 }
 
@@ -1050,7 +1164,7 @@ export async function verifyVolunteerWaiverOtp(input: {
       enabled: true,
       mode: 'CUSTOM' as const,
       subject: 'Waiver signed | {{event_name}}',
-      body: 'Hello {{name}},\n\nYour waiver for {{event_name}} (BIB {{bib}}) is signed. Check-in is recorded separately for each registration.',
+      body: 'Hello {{name}},\n\nYour waiver for {{event_name}} (BIB {{bib}}) is signed and your check-in is complete.',
       mappings: [
         { token: 'name', variable: 'name' as const },
         { token: 'event_name', variable: 'event_name' as const },
@@ -1099,6 +1213,9 @@ export async function performVolunteerAction(input: {
   helmetChecked?: boolean;
   bikeRack?: string;
   lockerNumber?: string;
+  scannedChipCode?: string;
+  chipReturnMethod?: ChipReturnMethod;
+  chipReturnReason?: string;
 }): Promise<VolunteerParticipant> {
   const assignment = activeAssignment(input.profile, input.eventId);
   const requiredModule = actionModules[input.action];
@@ -1142,11 +1259,15 @@ export async function performVolunteerAction(input: {
       relayTeamParticipantIds,
       action: input.action,
       volunteerName: input.profile.name,
-      waiverRequired: Boolean(event.waiverHtml),
+      waiverRequired: assignment.modules.includes("WAIVER_CHECK_IN") || eventHasWaiverIntent(event),
       registrationWaiverVerifiedAt: compatibleRosterWaiver,
       helmetChecked: input.helmetChecked,
       bikeRack: configuredRack || input.bikeRack,
       lockerNumber: input.lockerNumber,
+      assignedChipCode: participant.chipCode || null,
+      scannedChipCode: input.scannedChipCode,
+      chipReturnMethod: input.chipReturnMethod,
+      chipReturnReason: input.chipReturnReason,
       capturedAt: now,
     }),
   });
@@ -1165,6 +1286,13 @@ export async function performVolunteerAction(input: {
     capturedAt: now,
     bikeRack: next.bikeRack,
     lockerNumber: next.lockerNumber,
+    assignedChipCode: next.assignedChipCodeAtCheckout,
+    returnedChipCode: next.returnedChipCode,
+    returnedChipFullEpc: next.returnedChipFullEpc,
+    chipReturnStatus: next.chipReturnStatus,
+    chipReturnMethod: next.chipReturnMethod,
+    chipReturnReason: next.chipReturnReason,
+    bikeCheckoutTransactionId: next.bikeCheckoutTransactionId,
     status: "CONFIRMED",
   });
   return {
@@ -1197,6 +1325,7 @@ export async function assignParticipantEquipment(input: {
   participantId: string;
   kind: ParticipantEquipmentKind;
   code: string;
+  assignmentMethod?: "RFID_READER" | "QR" | "MANUAL" | "LEGACY";
 }): Promise<VolunteerParticipant> {
   const assignment = activeAssignment(input.profile, input.eventId);
   const combinedAthleteBandAllowed = input.kind === "athlete-band"
@@ -1206,7 +1335,15 @@ export async function assignParticipantEquipment(input: {
   if (!combinedAthleteBandAllowed) {
     requireModule(assignment, input.kind === "chip" ? "TIMING_CHIP_ASSIGNMENT_COUNTER" : "ATHLETE_BAND_ASSIGNMENT_COUNTER");
   }
-  const code = input.code.trim().replace(/\s+/g, "").toUpperCase();
+  const suppliedCode = input.code.trim().replace(/\s+/g, "").toUpperCase();
+  const readerValue = input.kind === "chip" && (input.assignmentMethod === "RFID_READER"
+    || (input.assignmentMethod !== "QR" && isReaderLikeEpc(input.code)))
+    ? rfidReaderAssignmentValue(input.code)
+    : null;
+  const inventoryChip = input.kind === "chip" && input.assignmentMethod !== "LEGACY"
+    ? await findRfidInventoryChip(readerValue?.fullEpc || suppliedCode)
+    : null;
+  const code = readerValue?.chipCode || inventoryChip?.chipNumber || inventoryChip?.epc || suppliedCode;
   if (!/^[A-Z0-9][A-Z0-9._:-]{1,63}$/.test(code)) throw new Error("Assignment code must be 2-64 characters using letters, numbers, dot, dash, underscore, or colon.");
   const before = await searchVolunteerParticipants({ profile: input.profile, eventId: input.eventId, query: input.participantId });
   const requestedParticipant = before.participants.find((row) => row.id === input.participantId || row.bib === input.participantId);
@@ -1236,7 +1373,17 @@ export async function assignParticipantEquipment(input: {
     throw new Error("This athlete must complete and verify their individual waiver before a wristband can be assigned.");
   }
   if (input.kind === "chip") {
-    await replaceParticipantChip({ eventIdOrSlug: input.eventId, participantId: participant.id, chipCode: code, reason: "Volunteer counter assignment", changedBy: `${input.profile.name} (${input.profile.id})` });
+    await replaceParticipantChip({
+      eventIdOrSlug: input.eventId,
+      participantId: participant.id,
+      chipCode: code,
+      fullEpc: inventoryChip?.epc || readerValue?.fullEpc,
+      inventoryChipId: inventoryChip?.id,
+      epcProfileId: inventoryChip?.epcProfileId,
+      assignmentMethod: readerValue ? "RFID_READER" : input.assignmentMethod === "QR" ? "QR" : "MANUAL",
+      reason: "Volunteer counter assignment",
+      changedBy: `${input.profile.name} (${input.profile.id})`,
+    });
   } else {
     await replaceParticipantAthleteBand({ eventIdOrSlug: input.eventId, participantId: participant.id, athleteBandCode: code, reason: "Volunteer counter assignment", changedBy: `${input.profile.name} (${input.profile.id})` });
   }
@@ -1318,7 +1465,7 @@ export async function captureVolunteerTiming(input: {
   gunStartAt?: string;
   deviceTimeZone?: string;
   replaceExisting?: boolean;
-}): Promise<{ id: string; participant: VolunteerParticipant; timingPointId: string; timingPointName: string; capturedAt: string; timingMode: "GUN" | "TIMING_POINT"; gunStartAt: string | null; gunElapsedSeconds: number | null; gunTime: string | null }> {
+}) {
   const assignment = activeAssignment(input.profile, input.eventId);
   requireModule(assignment, "MANUAL_TIMING");
   const event = await getEventBySlug(input.eventId, { includeUnpublished: true });
@@ -1371,11 +1518,19 @@ export async function captureVolunteerTiming(input: {
       : configuredGunStart;
   const gunStartAt = Number.isFinite(gunStartMs) ? new Date(gunStartMs).toISOString() : null;
   const elapsed = gunStartAt ? Math.max(0, Math.floor((Date.parse(capturedAt) - Date.parse(gunStartAt)) / 1_000)) : null;
+  const canonical = await getCanonicalLiveParticipant(event.id, participant.bib || participant.id);
+  const baseline = resolveManualTimingStart({
+    capturedAt,
+    chipStarts: canonical?.participant.splits.map(split => split.chipStartTimestamp) ?? [],
+    gunStarts: [contestGunStart?.gunStartAt, ...(canonical?.participant.splits.map(split => split.gunStartTimestamp) ?? []), hub.start.gunStartAt, input.gunStartAt],
+  });
+  const elapsedTime = baseline.elapsedSeconds === null ? null : formatGunTime(baseline.elapsedSeconds);
   const timingMode = timingPointId === MANUAL_GUN_FINISH_ID ? "GUN" : "TIMING_POINT";
   const row = await recordVolunteerOperation("manual-timing", {
     eventId: event.id,
     eventName: event.name,
     participantUid: participant.id,
+    canonicalParticipantUid: canonical?.participant.participantUid ?? null,
     bib: participant.bib,
     athleteName: participant.name,
     category: participant.category,
@@ -1390,16 +1545,18 @@ export async function captureVolunteerTiming(input: {
     gunStartAt,
     gunElapsedSeconds: elapsed,
     gunTime: elapsed === null ? null : formatGunTime(elapsed),
+    ...baseline,
+    elapsedTime,
     capturedAt,
     serverReceivedAt,
     deviceTimeZone: input.deviceTimeZone?.trim() || "",
     clockSkewMilliseconds,
     clockWarning,
-    configuredStartMode: Number.isFinite(officialContestGunStart) ? "GUN" : null,
-    startVerification: Number.isFinite(officialContestGunStart) ? "Official Feibot contest gun start" : gunStartAt ? "Configured gun fallback" : "Start unavailable",
-    status: elapsed === null && timingMode === "GUN" ? "RECORDED · GUN START REQUIRED" : "RECORDED",
+    configuredStartMode: baseline.elapsedStartSource,
+    startVerification: baseline.elapsedStartSource === "CHIP" ? "Accepted athlete chip start" : baseline.elapsedStartSource === "GUN" ? "Gun / configured start fallback" : "Start unavailable",
+    status: baseline.elapsedSeconds === null ? "RECORDED · START REQUIRED" : "RECORDED",
   });
-  return { id: row.id, participant: { ...participant, state: emptyState() }, timingPointId, timingPointName, capturedAt, timingMode, gunStartAt, gunElapsedSeconds: elapsed, gunTime: elapsed === null ? null : formatGunTime(elapsed) };
+  return { id: row.id, participant: { ...participant, state: emptyState() }, timingPointId, timingPointName, capturedAt, timingMode, gunStartAt, gunElapsedSeconds: elapsed, gunTime: elapsed === null ? null : formatGunTime(elapsed), ...baseline, elapsedTime };
 }
 
 export async function listRecentVolunteerTiming(input: {
@@ -1413,9 +1570,11 @@ export async function listRecentVolunteerTiming(input: {
   const resetIds = new Set(rows
     .filter((row) => row.eventId === input.eventId && row.action === "MANUAL_TIMING_RESET" && row.reversesOperationId)
     .map((row) => row.reversesOperationId as string));
+  const resettableId = latestResettableTimingId(rows, input.eventId, input.profile.id);
   return rows
     .filter((row) => row.eventId === input.eventId && row.action === "MANUAL_TIMING_CAPTURED" && !resetIds.has(row.id))
-    .slice(0, Math.max(1, Math.min(input.limit ?? 25, 50)));
+    .slice(0, Math.max(1, Math.min(input.limit ?? 25, 50)))
+    .map(row => ({ ...row, canReset: row.id === resettableId }));
 }
 
 export async function resetVolunteerTiming(input: {
@@ -1428,6 +1587,9 @@ export async function resetVolunteerTiming(input: {
   const rows = await listVolunteerManualTiming(300);
   const original = rows.find((row) => row.id === input.operationId && row.eventId === input.eventId && row.action === "MANUAL_TIMING_CAPTURED");
   if (!original) throw new Error("The timing stamp is not available to reset.");
+  if (latestResettableTimingId(rows, input.eventId, input.profile.id) !== original.id) {
+    throw new Error("Only your latest timing stamp can be reset. Earlier stamps require an administrator in the web logs.");
+  }
   if (rows.some((row) => row.eventId === input.eventId && row.action === "MANUAL_TIMING_RESET" && row.reversesOperationId === original.id)) {
     throw new Error("This timing stamp has already been reset.");
   }
@@ -1435,6 +1597,7 @@ export async function resetVolunteerTiming(input: {
     eventId: original.eventId,
     eventName: original.eventName,
     participantUid: original.participantUid,
+    canonicalParticipantUid: original.canonicalParticipantUid,
     bib: original.bib,
     athleteName: original.athleteName,
     volunteerId: input.profile.id,
@@ -1446,6 +1609,10 @@ export async function resetVolunteerTiming(input: {
     gunStartAt: original.gunStartAt,
     gunElapsedSeconds: original.gunElapsedSeconds,
     gunTime: original.gunTime,
+    elapsedStartAt: original.elapsedStartAt,
+    elapsedStartSource: original.elapsedStartSource,
+    elapsedSeconds: original.elapsedSeconds,
+    elapsedTime: original.elapsedTime,
     capturedAt: new Date().toISOString(),
     status: "RESET",
   });

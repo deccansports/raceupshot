@@ -37,9 +37,16 @@ export function platformSuccess<T>(data: T, meta: PlatformMetaInput = {}, init: 
 
 export function platformFailure(code: string, message: string, status = 500) {
   const requestId = crypto.randomUUID();
+  const retryable = status === 429 || status >= 500;
   const body: ApiErrorEnvelope = {
     success: false,
-    error: { code, message },
+    error: {
+      code,
+      type: code.toLowerCase(),
+      message,
+      display: message,
+      retryable,
+    },
     meta: { apiVersion: API_VERSION, requestId },
   };
   return NextResponse.json(body, {

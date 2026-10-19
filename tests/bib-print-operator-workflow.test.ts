@@ -22,6 +22,9 @@ describe("BERGMAN-inspired BIB and sticker operator workflow", () => {
     expect(route).toContain('body.action === "single-print"');
     expect(admin).toContain('action: "single-print"');
     expect(route).toContain('body.action === "four-up-print"');
+    expect(admin).toContain('purpose === "preview" && !example');
+    expect(admin).toContain('mode: "SELECTED", selectedIds: [example!.participantId]');
+    expect(admin).toContain('disabled={!canPreview}');
   });
 
   it("duplicates saved templates on the server into a validated event category", () => {

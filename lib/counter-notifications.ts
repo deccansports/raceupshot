@@ -173,6 +173,7 @@ export async function sendCounterNotificationTest(input: {
   event: { name: string; date?: string | null; location?: string | null };
   action: keyof typeof counterActions;
 }) {
+  input = { ...input, template: withKnownEmailTemplateMappings(input.action, input.template) };
   const now = new Date().toISOString();
   const values: Record<CounterVariable, string> = {
     name: 'Test Athlete', email: input.channel === 'EMAIL' ? input.recipient : 'athlete@example.com', mobile: input.channel === 'WHATSAPP' ? input.recipient : '+919999999999',

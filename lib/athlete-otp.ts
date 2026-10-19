@@ -5,6 +5,7 @@ import { createOtpAthleteSession } from "./athlete-session";
 import { sendBergtecnoEmail } from "./bergtecno-email";
 import { BERGTECNO_TEMPLATES } from "./email-templates";
 import { createAdminSession, isConfiguredAdminEmail } from "./admin-auth";
+import { normalizeAiSensyPhone, sendAiSensyOtpWhatsApp } from "./aisensy-whatsapp";
 
 const PREFIX = "raceupshot:auth:otp:";
 const OTP_SECONDS = 5 * 60;
@@ -50,6 +51,11 @@ function secureCode(): string {
   return String(values[0] % 1_000_000).padStart(6, "0");
 }
 
+function maskedMobile(value: string): string {
+  const normalized = normalizeAiSensyPhone(value).replace(/^\+/, "");
+  return normalized ? `${"*".repeat(Math.max(0, normalized.length - 4))}${normalized.slice(-4)}` : "";
+}
+
 function safeEqual(left: string, right: string): boolean {
   if (left.length !== right.length) return false;
   let difference = 0;
@@ -89,16 +95,26 @@ export async function requestAthleteOtp(emailInput: string, audience: "ATHLETE" 
     attempts: 0,
   };
   await kv.put(key, JSON.stringify(record), { expirationTtl: OTP_SECONDS + 60 });
-  const delivery = await sendBergtecnoEmail({
-    recipientEmail: email,
-    templateId: BERGTECNO_TEMPLATES.loginOtp.uuid,
-    variables: { otp: code, year: new Date().getFullYear() },
-  });
-  if (!delivery.sent) {
+  const mobile = audience === "ATHLETE" && profile ? `${profile.phoneCountryCode}${profile.mobileNumber}` : "";
+  const [whatsapp, emailDelivery] = await Promise.all([
+    audience === "ATHLETE" && profile
+      ? sendAiSensyOtpWhatsApp({ recipientPhone: mobile, recipientName: profile.name, otp: code })
+      : Promise.resolve({ accepted: false, error: "WhatsApp OTP is not used for administrator login." }),
+    sendBergtecnoEmail({
+      recipientEmail: email,
+      templateId: BERGTECNO_TEMPLATES.loginOtp.uuid,
+      variables: { otp: code, year: new Date().getFullYear() },
+    }),
+  ]);
+  if (!whatsapp.accepted && !emailDelivery.sent) {
     await kv.delete(key);
-    throw new Error(delivery.error || "The OTP email could not be sent.");
+    throw new Error(whatsapp.error || emailDelivery.error || "The OTP could not be sent.");
   }
-  return { requested: true, message: "Your six-digit OTP has been sent. It is valid for 5 minutes." };
+  const channels = [emailDelivery.sent ? "email" : "", whatsapp.accepted ? `WhatsApp to ${maskedMobile(mobile)}` : ""].filter(Boolean).join(" and ");
+  return {
+    requested: true,
+    message: `Your six-digit OTP was sent by ${channels}. ${whatsapp.accepted ? "Use the WhatsApp copy-code button or enter it manually. " : ""}It is valid for 5 minutes.`,
+  };
 }
 
 export async function verifyAthleteOtp(emailInput: string, code: string, includeMobileToken = false, audience: "ATHLETE" | "ADMIN" = "ATHLETE") {

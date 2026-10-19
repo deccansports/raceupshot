@@ -206,6 +206,26 @@ describe("Worker data contracts", () => {
     ] }).success).toBe(true);
   });
 
+  it("accepts ticket-scoped KML course geometry", () => {
+    const result = eventCourseCollectionInputSchema.safeParse({ maps: [{
+      mapId: "olympic-run",
+      eventId: "event-1",
+      ticketId: "olympic-triathlon",
+      providerContestUuid: "contest-olympic",
+      category: "Olympic Triathlon",
+      mapName: "Olympic Run",
+      mapType: "RUN",
+      fileName: "olympic-run.kml",
+      fileFormat: "KML",
+      points: [{ latitude: 16.7, longitude: 74.2 }, { latitude: 16.71, longitude: 74.21 }],
+      routeColor: "#d1495b",
+      visibility: { web: true, mobile: true, public: true },
+      displayOrder: 0,
+      updatedAt: "2026-10-18T00:00:00.000Z",
+    }] });
+    expect(result.success).toBe(true);
+  });
+
   it("requires a name for custom course-map types", () => {
     const result = eventCourseCollectionInputSchema.safeParse({ maps: [{
       mapId: "custom-map",

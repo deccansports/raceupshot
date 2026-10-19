@@ -2,7 +2,8 @@
 
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CourseMapsAdmin } from "@/components/course-maps-admin";
+import { CourseMapsAdmin, parseCourseFile } from "@/components/course-maps-admin";
+import { legacyTicketDefinition } from "@/lib/event-ticket-definition";
 import type { EventCourseCollection } from "@/packages/contracts/src";
 
 vi.mock("@/components/google-course-map", () => ({
@@ -15,6 +16,15 @@ afterEach(() => {
 });
 
 describe("CourseMapsAdmin persistence", () => {
+  it("converts KML LineString coordinates into compact course points", () => {
+    const parsed = parseCourseFile(`<?xml version="1.0"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document><Placemark><LineString><coordinates>73.8567,18.5204,550 73.8667,18.5304,560</coordinates></LineString></Placemark></Document></kml>`, "KML");
+    expect(parsed.fileFormat).toBe("KML");
+    expect(parsed.points).toEqual([
+      { latitude: 18.5204, longitude: 73.8567, elevation: 550 },
+      { latitude: 18.5304, longitude: 73.8667, elevation: 560 },
+    ]);
+  });
+
   it("reloads the persisted event-scoped collection when the tab is reopened", async () => {
     const persisted: EventCourseCollection = {
       eventId: "event-1",
@@ -56,5 +66,25 @@ describe("CourseMapsAdmin persistence", () => {
       expect.objectContaining({ cache: "no-store" }),
     );
     expect(screen.getAllByTestId("google-map").at(-1)?.textContent).toBe("1 routes");
+  });
+
+  it("offers map legs configured for the selected ticket", () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true, data: { eventId: "event-1", maps: [], updatedAt: null } }) }));
+    const ticket = { ...legacyTicketDefinition("Duathlon"), enabledDisciplines: ["BIKE", "RUN"] as ("BIKE" | "RUN")[] };
+    render(<CourseMapsAdmin
+      eventId="event-1"
+      eventName="Test Event"
+      sport="Duathlon"
+      categories={["Duathlon"]}
+      tickets={[ticket]}
+      initialCollection={{ eventId: "event-1", maps: [], updatedAt: null }}
+    />);
+
+    const mapType = screen.getByLabelText("Map type") as HTMLSelectElement;
+    const optionValues = Array.from(mapType.options).map((option) => option.value);
+    expect(mapType.value).toBe("BIKE");
+    expect(optionValues).toContain("BIKE");
+    expect(optionValues).toContain("RUN");
+    expect(optionValues).not.toContain("SWIM");
   });
 });

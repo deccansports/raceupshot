@@ -12,7 +12,7 @@ export const counterVariables = ['name', 'email', 'mobile', 'bib', 'category', '
 const mapping = z.object({ token: z.string().regex(/^[A-Za-z][A-Za-z0-9_]*$/), variable: z.enum(counterVariables) });
 const counterTemplateBaseSchema = z.object({
   schemaVersion: z.literal(1),
-  email: z.object({ enabled: z.boolean(), mode: z.enum(['PROVIDER_TEMPLATE', 'CUSTOM']).default('CUSTOM'), templateId: z.string().max(200).default(''), subject: z.string().max(500), body: z.string().max(30000), mappings: z.array(mapping).max(40), attachWaiver: z.boolean() }),
+  email: z.object({ enabled: z.boolean(), configured: z.boolean().default(false), mode: z.enum(['PROVIDER_TEMPLATE', 'CUSTOM']).default('CUSTOM'), templateId: z.string().max(200).default(''), subject: z.string().max(500), body: z.string().max(30000), mappings: z.array(mapping).max(40), attachWaiver: z.boolean() }),
   whatsapp: z.object({ enabled: z.boolean(), campaignName: z.string().max(160).default(''), templateName: z.string().max(150), language: z.string().max(30), parameters: z.array(z.enum(counterVariables)).max(30), attachWaiver: z.boolean() }),
   waiver: z.object({ urlField: z.enum(['waiverDocumentUrl', 'signedWaiverUrl', 'waiverPdfUrl', 'waiver_url']), allowedOrigin: z.string().max(250) }),
 });
@@ -50,16 +50,61 @@ export const waiverCheckinEmailMappings: CounterTemplate['email']['mappings'] = 
   { token: 'checkintime', variable: 'action_time' },
 ];
 
-/** Keep the provider-owned variable contract fixed for known saved templates. */
-export function withKnownEmailTemplateMappings(action: string, template: CounterTemplate): CounterTemplate {
-  if (action !== 'WAIVER_VERIFY'
-    || resolveBergtecnoTemplateId(template.email.templateId) !== BERGTECNO_TEMPLATES.waiverCheckin.uuid) return template;
+export const waiverCheckinWhatsAppParameters: CounterTemplate['whatsapp']['parameters'] = [
+  'name',
+  'event_name',
+  'category',
+  'bib',
+  'action_time',
+];
+
+export const bikeCheckWhatsAppParameters: CounterTemplate['whatsapp']['parameters'] = [
+  'name',
+  'event_name',
+  'action_date',
+  'action_time',
+  'event_name',
+];
+
+function upgradeBikeNotificationTemplate(action: string, template: CounterTemplate): CounterTemplate {
+  if (action !== 'BIKE_IN' && action !== 'BIKE_OUT') return template;
+  const shouldEnableUnconfiguredEmail = template.whatsapp.enabled && !template.email.configured;
   return {
     ...template,
-    email: {
+    email: shouldEnableUnconfiguredEmail
+      ? { ...template.email, enabled: true, mode: 'CUSTOM' }
+      : template.email,
+  };
+}
+
+export function automaticCounterMappings(action: string, template: CounterTemplate) {
+  return {
+    email: action === 'WAIVER_VERIFY'
+      && resolveBergtecnoTemplateId(template.email.templateId) === BERGTECNO_TEMPLATES.waiverCheckin.uuid,
+    whatsapp: (action === 'WAIVER_VERIFY' && template.whatsapp.campaignName.trim().toLowerCase() === 'waivercheckin')
+      || ((action === 'BIKE_IN' || action === 'BIKE_OUT') && Boolean(template.whatsapp.campaignName.trim())),
+  };
+}
+
+/** Keep the provider-owned variable contract fixed for known saved templates. */
+export function withKnownEmailTemplateMappings(action: string, template: CounterTemplate): CounterTemplate {
+  template = upgradeBikeNotificationTemplate(action, template);
+  const automatic = automaticCounterMappings(action, template);
+  const knownEmail = automatic.email;
+  const knownWhatsApp = automatic.whatsapp;
+  if (!knownEmail && !knownWhatsApp) return template;
+  return {
+    ...template,
+    email: knownEmail ? {
       ...template.email,
       mappings: waiverCheckinEmailMappings.map((mapping) => ({ ...mapping })),
-    },
+    } : template.email,
+    whatsapp: knownWhatsApp ? {
+      ...template.whatsapp,
+      parameters: action === 'WAIVER_VERIFY'
+        ? [...waiverCheckinWhatsAppParameters]
+        : [...bikeCheckWhatsAppParameters],
+    } : template.whatsapp,
   };
 }
 
@@ -80,14 +125,16 @@ export function withAutomaticWaiverStorage(input: unknown, requestOrigin: string
 }
 
 export function emptyCounterTemplate(action?: keyof typeof counterActions): CounterTemplate {
-  const whatsappParameters: CounterVariable[] = action === 'BIKE_IN' || action === 'BIKE_OUT'
-    ? ['name', 'action_date', 'action_time', 'event_name']
+  const whatsappParameters: CounterVariable[] = action === 'WAIVER_VERIFY'
+    ? [...waiverCheckinWhatsAppParameters]
+    : action === 'BIKE_IN' || action === 'BIKE_OUT'
+    ? [...bikeCheckWhatsAppParameters]
     : ['name', 'event_name', 'bib'];
   const waiverEmail = action === 'WAIVER_VERIFY';
   const emailMappings: CounterTemplate['email']['mappings'] = waiverEmail
     ? waiverCheckinEmailMappings.map((mapping) => ({ ...mapping }))
     : ['name', 'event_name', 'counter', 'bib'].map((token) => ({ token, variable: token as CounterVariable }));
-  return { schemaVersion: 1, email: { enabled: false, mode: 'PROVIDER_TEMPLATE', templateId: waiverEmail ? BERGTECNO_TEMPLATES.waiverCheckin.uuid : '', subject: '{{event_name}} · {{counter}}', body: 'Hello {{name}},\nYour {{counter}} has been recorded for BIB {{bib}}.', mappings: emailMappings, attachWaiver: false }, whatsapp: { enabled: false, campaignName: '', templateName: '', language: 'en', parameters: whatsappParameters, attachWaiver: false }, waiver: { urlField: 'waiverDocumentUrl', allowedOrigin: '' } };
+  return { schemaVersion: 1, email: { enabled: false, configured: false, mode: 'PROVIDER_TEMPLATE', templateId: waiverEmail ? BERGTECNO_TEMPLATES.waiverCheckin.uuid : '', subject: '{{event_name}} · {{counter}}', body: 'Hello {{name}},\nYour {{counter}} has been recorded for BIB {{bib}}.', mappings: emailMappings, attachWaiver: false }, whatsapp: { enabled: false, campaignName: '', templateName: '', language: 'en', parameters: whatsappParameters, attachWaiver: false }, waiver: { urlField: 'waiverDocumentUrl', allowedOrigin: '' } };
 }
 
 export function counterEmailVariables(mappings: CounterTemplate['email']['mappings'], values: Partial<Record<CounterVariable, string>>): Record<string, string> {

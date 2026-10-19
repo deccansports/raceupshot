@@ -3,6 +3,7 @@ import type { KVNamespace } from "@cloudflare/workers-types";
 import { getEventBySlug } from "./raceupshot-repository";
 import { getEventPlatformSettings, saveEventPlatformSettings } from "./platform-repository";
 import { withTransientKvRetry } from "./kv-retry";
+import { normalizeRaceFlowPassages } from "./race-flow-editor";
 
 const PREFIX = "raceupshot";
 
@@ -198,7 +199,7 @@ export async function getLiveTrackingHubConfig(eventIdOrSlug: string): Promise<L
     start: { ...defaults.start, ...stored.start },
     notifications: { ...defaults.notifications, ...stored.notifications },
     legs: (stored.legs ?? []).map((leg) => ({ ...leg, cutoffSeconds: leg.cutoffSeconds ?? null })),
-    splits: normalizeFinalRaceSplits((stored.splits ?? []).map((split) => ({
+    splits: normalizeFinalRaceSplits(normalizeRaceFlowPassages((stored.splits ?? []).map((split) => ({
       ...split,
       providerContestUuid: split.providerContestUuid ?? null,
       importedName: split.importedName ?? null,
@@ -207,7 +208,7 @@ export async function getLiveTrackingHubConfig(eventIdOrSlug: string): Promise<L
       // course validation. Preserve that behaviour when upgrading old data;
       // public visibility must never silently change the timing requirement.
       requiredForProgression: split.requiredForProgression ?? true,
-    }))),
+    })))),
     timingPoints: (stored.timingPoints ?? []).map((point) => ({
       ...point,
       course: point.course ?? (point.type === "FINISH" ? "FINISH" : point.type === "SPLIT" ? "SPLIT" : "RUN"),
@@ -281,7 +282,7 @@ export async function getPublicLiveTimingConfiguration(eventIdOrSlug: string) {
 export async function saveLiveTrackingHubConfig(eventIdOrSlug: string, config: Omit<LiveTrackingHubConfig, "eventId" | "updatedAt">): Promise<LiveTrackingHubConfig> {
   const event = await getEventBySlug(eventIdOrSlug, { includeUnpublished: true });
   if (!event) throw new Error("Event not found.");
-  const saved: LiveTrackingHubConfig = { ...config, splits: normalizeFinalRaceSplits(config.splits), eventId: event.id, updatedAt: new Date().toISOString() };
+  const saved: LiveTrackingHubConfig = { ...config, splits: normalizeFinalRaceSplits(normalizeRaceFlowPassages(config.splits)), eventId: event.id, updatedAt: new Date().toISOString() };
   const kv = await getKv();
   const platform = await getEventPlatformSettings(event.id);
   await Promise.all([

@@ -263,6 +263,21 @@ function deepResponseRows(payload: unknown, ...keys: string[]): JsonRecord[] {
   return fallback;
 }
 
+/** A successful explicit collection, including an empty one, is authoritative. */
+export function isAuthoritativeParticipantPayload(payload: unknown): boolean {
+  if (Array.isArray(payload)) return true;
+  const queue: unknown[] = [payload];
+  while (queue.length) {
+    const record = asRecord(queue.shift());
+    if (!record) continue;
+    for (const [key, value] of Object.entries(record)) {
+      if (["participants", "athletes", "rows"].includes(normalizedRecordKey(key)) && Array.isArray(value)) return true;
+      if (value && typeof value === "object") queue.push(value);
+    }
+  }
+  return false;
+}
+
 function findDownloadUrl(payload: unknown): string {
   const queue: unknown[] = [payload];
   while (queue.length) {
@@ -918,19 +933,20 @@ export async function connectFeibotEvent(
     throw new Error(`${status === "AUTH_ERROR" ? "Feibot rejected the key or event UUID" : "Feibot connection failed"}: ${timingRules.message}`);
   }
 
-  const [
-    participantsResponse,
-    liveResultsResponse,
-    processResponse,
-    resultsResponse,
-    leaderboardResponse,
-  ] = await Promise.all([
-    callFeibot(credentials, "/temporary/participantsGetAll"),
-    callFeibot(credentials, "/temporary/temporary_ResultDataGetAll"),
-    callFeibot(credentials, "/api/processQuery"),
-    callFeibot(credentials, "/finishResultGetAll"),
-    callFeibot(credentials, "/api/leaderboardQuery"),
-  ]);
+  // Keep provider reads sequential. Feibot applies one shared limiter to these
+  // endpoints, so a Promise.all burst can produce 429 even at a safe polling
+  // interval.
+  const participantsResponse = await callFeibot(credentials, "/temporary/participantsGetAll");
+  const liveResultsResponse = await callFeibot(credentials, "/temporary/temporary_ResultDataGetAll");
+  const resultsResponse = await callFeibot(credentials, "/finishResultGetAll");
+  const leaderboardResponse = await callFeibot(credentials, "/api/leaderboardQuery");
+  // processQuery is not enabled for many Feibot accounts (HTTP 403). It is an
+  // optional diagnostics feed and is queried only by the explicit read test.
+  const processResponse = {
+    ok: false, status: 204, data: null, message: "Optional processed-read feed not queried.",
+    retryAfterMilliseconds: null, retryable: false, providerCode: null, providerType: null,
+    outcome: "no_results" as TimingProviderOutcome,
+  };
   const [participantPayload, liveResultPayload, finalResultPayload, leaderboardPayload] = await Promise.all([
     participantsResponse.ok
       ? resolveDownloadedPayload(participantsResponse.data).catch(() => participantsResponse.data)
@@ -1123,13 +1139,14 @@ export async function connectFeibotEvent(
       kv.put(`${PREFIX}:live:event:${event.id}:results`, JSON.stringify(finalResultPayload)),
     );
   }
-  if (participantRows.length) {
+  const authoritativeParticipantRoster = participantsResponse.ok && isAuthoritativeParticipantPayload(participantPayload);
+  if (participantRows.length || authoritativeParticipantRoster) {
     writes.push(kv.put(`${PREFIX}:live:event:${event.id}:participants`, JSON.stringify({ participants: participantRows })));
   }
   await Promise.all(writes);
   // Feibot is an ingestion source. The versioned canonical snapshot is the only
   // live dataset exposed to web/mobile once it exists.
-  if (participantsResponse.ok && providerParticipantRows.length > 0) {
+  if (participantsResponse.ok && (providerParticipantRows.length > 0 || authoritativeParticipantRoster)) {
     const [hubConfig, courseMaps, previousManifest] = await Promise.all([
       getLiveTrackingHubConfig(event.id),
       getAdminEventCourseMaps(event.id),
@@ -1347,17 +1364,48 @@ export function parseFeibotTimingRules(payload: unknown): ImportedFeibotRules {
     const name = recordText(row, "display_name", "leg_name", "legName", "name", "type") || `Leg ${index + 1}`;
     const id = recordText(row, "leg_uuid", "legUuid", "uuid", "id") || `leg-${index + 1}`;
     const contestUuid = recordText(row, "contest_uuid", "contestUuid");
-    const linkedSplits = splitRows.filter((split) => !contestUuid || recordText(split, "contest_uuid", "contestUuid") === contestUuid);
+    const contestSplits = splitRows.filter((split) => !contestUuid || recordText(split, "contest_uuid", "contestUuid") === contestUuid);
+    const directlyLinkedSplits = contestSplits.filter((split) => recordText(split, "leg_uuid", "legUuid", "leg_id", "legId") === id);
+    const namedType = inferredLegType(name);
+    const sportLinkedSplits = namedType === "OTHER" || namedType === "TRANSITION" ? [] : contestSplits.filter((split) => {
+      const providerType = inferredLegType(recordText(split, "type_of_sport", "typeOfSport"));
+      const splitType = inferredLegType(recordText(split, "split_name", "splitName", "display_name", "name"));
+      return providerType === namedType || splitType === namedType;
+    });
+    const isLastSportLeg = namedType !== "OTHER" && namedType !== "TRANSITION" && !legRows.slice(index + 1).some((candidate) => {
+      const candidateType = inferredLegType(recordText(candidate, "display_name", "leg_name", "legName", "name", "type"));
+      return candidateType !== "OTHER" && candidateType !== "TRANSITION";
+    });
+    const inferredSportSplits = isLastSportLeg
+      ? [...new Set([...sportLinkedSplits, ...contestSplits.filter((split) => {
+          const splitName = recordText(split, "split_name", "splitName", "display_name", "name");
+          return inferredLegType(splitName) === "OTHER" && /finish/i.test(splitName);
+        })])]
+      : sportLinkedSplits;
+    // Some Feibot triathlon payloads attach only a contest UUID to every leg.
+    // Never use the whole contest's cumulative finish distance for each sport.
+    const linkedSplits = directlyLinkedSplits.length
+      ? directlyLinkedSplits
+      : inferredSportSplits.length
+        ? inferredSportSplits
+        : legRows.length === 1
+          ? contestSplits
+          : [];
     const providerSport = linkedSplits.map((split) => recordText(split, "type_of_sport", "typeOfSport")).find(Boolean) ?? "";
     const linkedDistances = linkedSplits
       .map((split) => numeric(split, "distance_from_start", "distanceFromStart", "km", "distance_km", "distanceKm"))
       .filter((value): value is number => value !== null);
+    const inferredDistance = linkedDistances.length >= 2
+      ? Math.max(...linkedDistances) - Math.min(...linkedDistances)
+      : legRows.length === 1 && linkedDistances.length === 1
+        ? linkedDistances[0]
+        : null;
     return [{
       id,
       name,
-      type: inferredLegType(name) !== "OTHER" ? inferredLegType(name) : inferredLegType(providerSport),
+      type: namedType !== "OTHER" ? namedType : inferredLegType(providerSport),
       order: Math.max(0, numeric(row, "order", "leg_index", "index") ?? index),
-      distanceKm: numeric(row, "distance_km", "distanceKm", "km") ?? (linkedDistances.length ? Math.max(...linkedDistances) : null),
+      distanceKm: numeric(row, "distance_km", "distanceKm", "km") ?? inferredDistance,
       cutoffSeconds: numeric(row, "cutoff_seconds", "cutoffSeconds"),
     }];
   });
@@ -1371,7 +1419,9 @@ export function parseFeibotTimingRules(payload: unknown): ImportedFeibotRules {
     const namedSport = inferredLegType(importedName);
     const legId = legs.some((leg) => leg.id === rawLegId)
       ? rawLegId
-      : legs.find((leg) => leg.type === namedSport)?.id ?? legs[0].id;
+      : legs.find((leg) => leg.type === namedSport)?.id
+        ?? (/finish/i.test(importedName) ? [...legs].reverse().find((leg) => leg.type !== "TRANSITION")?.id : undefined)
+        ?? legs[0].id;
     return [{ id, name: importedName, importedName, legId, order: Math.max(0, numeric(row, "split_index", "splitIndex", "order", "index") ?? index), distanceKm: numeric(row, "distance_from_start", "distanceFromStart", "km", "km_marking", "distance_km", "distanceKm"), timingPointId: recordText(row, "timing_point_uuid", "timingPointUuid", "timing_point_id") || null, passage: Math.max(1, numeric(row, "calculated_timing_point_use_pass_num", "calculatedTimingPointUsePassNum", "passage", "pass", "lap") ?? 1), cutoffSeconds: numeric(row, "cutoff_seconds", "cutoffSeconds"), providerContestUuid: recordText(row, "contest_uuid", "contestUuid") || null, isFinalRaceSplit: recordBoolean(row, "is_final_race_split", "isFinalRaceSplit", "is_race_finish", "isRaceFinish"), visible: true }];
   });
   const expandedFlow = expandFeibotSportLegs(legs, splits);
@@ -1407,7 +1457,7 @@ async function writeOperationLog(eventId: string, operation: string, status: Fei
 async function operationLogs(eventId: string): Promise<FeibotOperationLog[]> {
   const kv = await getKv();
   const recent = await kv.get<FeibotOperationLog[]>(operationRecentLogsKey(eventId), "json");
-  if (Array.isArray(recent)) return recent.slice(0, 100);
+  if (Array.isArray(recent)) return recent.filter((log) => !log.message.includes("/api/processQuery is not enabled by Feibot")).slice(0, 100);
   const index = (await kv.get<string[]>(operationLogIndexKey(eventId), "json")) ?? [];
   // One-time migration for older event logs. Keep this deliberately bounded;
   // loading the former 500-key index overwhelmed Wrangler's remote KV bridge.
@@ -1656,9 +1706,41 @@ interface FeibotLiveSyncState {
   publishedConnections: number;
   connections: number;
   accessDeniedFeeds?: FeibotFeedAccessBackoff[];
+  lastRosterSyncAt?: string | null;
+  lastRosterSyncAttemptAt?: string | null;
+  feedLastAttemptAt?: Record<string, string>;
 }
 
 type FeibotResultFeedEndpoint = "/temporary/temporary_ResultDataGetAll" | "/api/processQuery" | "/finishResultGetAll";
+
+export const AUTOMATIC_FEIBOT_RESULT_FEEDS = [
+  { endpoint: "/temporary/temporary_ResultDataGetAll" as const, storage: "live-results" },
+  { endpoint: "/finishResultGetAll" as const, storage: "results" },
+];
+
+const FEIBOT_FEED_INTERVAL_MS: Record<FeibotResultFeedEndpoint, number> = {
+  "/temporary/temporary_ResultDataGetAll": 60_000,
+  "/api/processQuery": 300_000,
+  "/finishResultGetAll": 300_000,
+};
+
+function feibotFeedAttemptKey(connectionId: string, endpoint: FeibotResultFeedEndpoint) {
+  return `${connectionId}:${endpoint}`;
+}
+
+export function isFeibotResultFeedDue(
+  endpoint: FeibotResultFeedEndpoint,
+  lastAttemptAt: string | null | undefined,
+  now = Date.now(),
+): boolean {
+  const previous = Date.parse(lastAttemptAt ?? "");
+  return !Number.isFinite(previous) || now - previous >= FEIBOT_FEED_INTERVAL_MS[endpoint];
+}
+
+export function shouldReconcileFeibotRoster(lastAttemptAt: string | null | undefined, now = Date.now(), intervalMs = 300_000): boolean {
+  const previous = Date.parse(lastAttemptAt ?? "");
+  return !Number.isFinite(previous) || now - previous >= intervalMs;
+}
 
 interface FeibotFeedAccessBackoff {
   connectionId: string;
@@ -1859,6 +1941,28 @@ export async function syncFeibotLiveResults(eventId: string) {
   const rateLimitedUntil: string[] = [];
   const accessDeniedFeeds = (previousState?.accessDeniedFeeds ?? [])
     .filter((feed) => isFeibotCooldownActive(feed.retryAt));
+  let lastRosterSyncAt = previousState?.lastRosterSyncAt ?? null;
+  let lastRosterSyncAttemptAt = previousState?.lastRosterSyncAttemptAt ?? null;
+  const feedLastAttemptAt = { ...(previousState?.feedLastAttemptAt ?? {}) };
+  if (shouldReconcileFeibotRoster(lastRosterSyncAttemptAt)) {
+    lastRosterSyncAttemptAt = new Date().toISOString();
+    let rosterSyncComplete = true;
+    for (const entry of registry.connections) {
+      try {
+        await connectFeibotEvent(event.id, { connectionId: entry.connectionId });
+        const reconciledAt = new Date().toISOString();
+        for (const feed of AUTOMATIC_FEIBOT_RESULT_FEEDS) {
+          feedLastAttemptAt[
+            feibotFeedAttemptKey(entry.connectionId, feed.endpoint)
+          ] = reconciledAt;
+        }
+      } catch (error) {
+        rosterSyncComplete = false;
+        warnings.push(`${entry.label}: automatic participant reconciliation failed: ${error instanceof Error ? error.message : "unknown error"}`);
+      }
+    }
+    if (rosterSyncComplete) lastRosterSyncAt = new Date().toISOString();
+  }
   for (const entry of registry.connections) {
     const credentialRecord = await resolveEventCredentials(kv, event, entry.connectionId);
     if (!credentialRecord) {
@@ -1872,20 +1976,55 @@ export async function syncFeibotLiveResults(eventId: string) {
       continue;
     }
     const receivedAt = new Date().toISOString();
-    const resultFeeds: Array<{ endpoint: FeibotResultFeedEndpoint; storage: string }> = [
-      { endpoint: "/temporary/temporary_ResultDataGetAll" as const, storage: "live-results" },
-      { endpoint: "/api/processQuery" as const, storage: "process" },
-      { endpoint: "/finishResultGetAll" as const, storage: "results" },
-    ];
+    const resultFeeds: Array<{ endpoint: FeibotResultFeedEndpoint; storage: string }> = [...AUTOMATIC_FEIBOT_RESULT_FEEDS];
     const availableResultFeeds = resultFeeds.filter((feed) => !accessDeniedFeeds.some((blocked) =>
       blocked.connectionId === entry.connectionId
       && blocked.endpoint === feed.endpoint
       && isFeibotCooldownActive(blocked.retryAt),
     ));
-    const responses = await Promise.all(availableResultFeeds.map(async (feed) => ({
-      ...feed,
-      response: await callFeibotWithRateLimitRetry(credentialRecord.resolved, feed.endpoint),
-    })));
+    // Never burst multiple result endpoints at Feibot from one alarm. Select
+    // the oldest due feed: live data is checked every minute while the final
+    // results feed rotates in on a five-minute cadence.
+    const now = Date.now();
+    const dueResultFeeds = availableResultFeeds
+      .filter((feed) => {
+        const key = feibotFeedAttemptKey(entry.connectionId, feed.endpoint);
+        return isFeibotResultFeedDue(feed.endpoint, feedLastAttemptAt[key], now);
+      })
+      .sort((left, right) => {
+        const leftAt = Date.parse(
+          feedLastAttemptAt[
+            feibotFeedAttemptKey(entry.connectionId, left.endpoint)
+          ] ?? "",
+        );
+        const rightAt = Date.parse(
+          feedLastAttemptAt[
+            feibotFeedAttemptKey(entry.connectionId, right.endpoint)
+          ] ?? "",
+        );
+        return (
+          (Number.isFinite(leftAt) ? leftAt : 0) -
+          (Number.isFinite(rightAt) ? rightAt : 0)
+        );
+      })
+      .slice(0, 1);
+    const responses = [] as Array<
+      (typeof dueResultFeeds)[number] & {
+        response: Awaited<ReturnType<typeof callFeibotWithRateLimitRetry>>;
+      }
+    >;
+    for (const feed of dueResultFeeds) {
+      const key = feibotFeedAttemptKey(entry.connectionId, feed.endpoint);
+      feedLastAttemptAt[key] = new Date(now).toISOString();
+      responses.push({
+        ...feed,
+        response: await callFeibotWithRateLimitRetry(
+          credentialRecord.resolved,
+          feed.endpoint,
+        ),
+      });
+    }
+    if (responses.length === 0) continue;
     const readableRows: JsonRecord[][] = [];
     let successfulFeeds = 0;
     for (const feed of responses) {
@@ -1959,6 +2098,9 @@ export async function syncFeibotLiveResults(eventId: string) {
     publishedConnections,
     connections: registry.connections.length,
     accessDeniedFeeds,
+    lastRosterSyncAt,
+    lastRosterSyncAttemptAt,
+    feedLastAttemptAt,
   };
   await kv.put(liveSyncStateKey(event.id), JSON.stringify(state));
   if (publishedConnections) await writeOperationLog(event.id, "FETCH_FEIBOT_RESULTS", "SUCCESS", `${fetchedRows} result rows checked; ${publishedConnections} connection update${publishedConnections === 1 ? "" : "s"} published to canonical.`);

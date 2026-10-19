@@ -22,11 +22,11 @@ export default async function EventCourseMapsPage({ params }: { params: Promise<
           <div>
             <Link href="/admin/events-registration?tab=event_info#managed-events" className="admin-back-link"><ArrowLeft /> Events & registration</Link>
             <h1>Course Maps</h1>
-            <p>{event.name} · category-specific GPX routes, combined courses and custom overlays.</p>
+            <p>{event.name} · ticket-specific GPX/KML routes, combined courses and custom overlays.</p>
           </div>
           <span className="status-pill"><Map /> {collection.maps.length} maps</span>
         </div>
-        <CourseMapsAdmin eventId={event.id} eventName={event.name} sport={event.sport} categories={event.categories} initialCollection={collection} />
+        <CourseMapsAdmin eventId={event.id} eventName={event.name} sport={event.sport} categories={event.categories} tickets={event.ticketDefinitions} initialCollection={collection} />
       </main>
     </AdminLayout>
   );

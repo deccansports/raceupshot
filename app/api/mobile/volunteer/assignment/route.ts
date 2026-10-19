@@ -4,6 +4,7 @@ import { requireVolunteer } from "@/lib/volunteer-auth";
 import { getEventBySlug } from "@/lib/raceupshot-repository";
 import { listVolunteerEventOptions, MANUAL_GUN_FINISH_ID, MANUAL_GUN_FINISH_NAME, normalizeVolunteerModules } from "@/lib/volunteer-management";
 import { listVolunteerCustomCounters } from "@/lib/volunteer-custom-counters";
+import { eventHasWaiverIntent } from "@/lib/event-waiver-policy";
 
 export const dynamic = "force-dynamic";
 export const OPTIONS = mobileCorsPreflight;
@@ -20,9 +21,10 @@ export async function GET(request: Request) {
       const finishPoint = current?.timingPoints.filter((point) => point.type === "FINISH").at(-1);
       const customCounters = (await listVolunteerCustomCounters(assignment.eventId))
         .filter((counter) => counter.active && (assignment.customCounterIds ?? []).includes(counter.id));
+      const modules = normalizeVolunteerModules(assignment.modules);
       return {
         ...assignment,
-        modules: normalizeVolunteerModules(assignment.modules),
+        modules,
         providerEventUuid: current?.providerEventUuid ?? assignment.providerEventUuid,
         contestUuids: current?.contestUuids ?? assignment.contestUuids,
         timingPointIds: automaticTiming ? [finishPoint?.id || MANUAL_GUN_FINISH_ID] : assignment.timingPointIds,
@@ -34,7 +36,7 @@ export async function GET(request: Request) {
         eventDate: event?.dateIso || null,
         eventLocation: event?.location || "",
         eventLogoUrl: event?.logoUrl || null,
-        waiverRequired: Boolean(event?.waiverHtml),
+        waiverRequired: modules.includes("WAIVER_CHECK_IN") || eventHasWaiverIntent(event),
         waiverVersion: event?.waiverVersion || "",
       };
     }));

@@ -1,4 +1,5 @@
 import { getCloudflareContext } from "@opennextjs/cloudflare";
+import { configuredCourseDistance } from './course-distance';
 import type { KVNamespace } from "@cloudflare/workers-types";
 import type {
   Announcement,
@@ -799,7 +800,7 @@ export interface AdminLiveParticipantDetail {
 type AdminHubConfig = {
   start?: { gunStartAt?: string | null };
   legs?: Array<{ id: string; name: string; type: string; distanceKm: number | null }>;
-  splits?: Array<{ id: string; name: string; legId: string; order: number; distanceKm: number | null; timingPointId?: string | null }>;
+  splits?: Array<{ id: string; name: string; legId: string; order: number; distanceKm: number | null; timingPointId?: string | null; providerContestUuid?: string | null; isFinalRaceSplit?: boolean }>;
   timingPoints?: Array<{ id: string; type: "START" | "SPLIT" | "FINISH" }>;
 };
 
@@ -927,7 +928,9 @@ export async function getAdminLiveParticipantDetail(
   const latest = enrichedSplits.at(-1);
   const latestConfigured = latest ? configuredById.get(latest.splitId) ?? configuredByName.get(latest.name.trim().toLowerCase()) : undefined;
   const currentLegConfig = hubConfig?.legs?.find((leg) => leg.id === latestConfigured?.legId);
-  const totalDistanceKm = (hubConfig?.legs ?? []).reduce((total, leg) => total + (leg.distanceKm ?? 0), 0);
+  const contestScope = indexRow?.providerContestUuid || baseParticipant.contestId;
+  const scopedCourseSplits = configuredSplits.filter(split => !split.providerContestUuid || split.providerContestUuid === contestScope);
+  const totalDistanceKm = configuredCourseDistance(scopedCourseSplits, hubConfig?.legs ?? []);
   const distanceCompletedKm = baseParticipant.raceStatus === "FINISHED"
     ? totalDistanceKm || latest?.distanceKm
     : latest?.distanceKm;
@@ -962,11 +965,11 @@ export async function getAdminLiveParticipantDetail(
       contestUuid: indexRow?.contestUuid || (raw ? stringValue(raw, "contestUuid", "contest_uuid", "providerContestUuid") : "") || null,
       dateOfBirth: raw ? stringValue(raw, "dateOfBirth", "date_of_birth", "dob") || null : null,
       waveStartTime: indexRow?.waveStartTime || (raw ? stringValue(raw, "waveStartTime", "wave_start_time") : "") || null,
-      acceptedStartTime: (raw ? stringValue(raw, "chipStartTime", "chip_start_time", "acceptedStartTime", "startTime", "start_time") : "") || timestampFromGunStart(firstStart, gunStartAt),
+      acceptedStartTime: firstStart?.readerTimestamp || firstStart?.timestamp || timestampFromGunStart(firstStart, gunStartAt) || (raw ? stringValue(raw, "chipStartTime", "chip_start_time", "acceptedStartTime", "startTime", "start_time") : "") || null,
       finishTime: baseParticipant.raceStatus === "FINISHED"
         ? timestampFromGunStart(lastFinish, gunStartAt)
         : null,
-      currentSplit: (raw ? stringValue(raw, "currentSplit", "current_split", "lastSplit", "last_split") : "") || participant.latestTimingPoint || latest?.name || null,
+      currentSplit: participant.latestTimingPoint || latest?.name || null,
       statusDetail: indexRow?.statusReason || (raw ? stringValue(raw, "statusDetail", "status_detail", "statusReason", "status_reason") : "") || (participant.timingSource === "FEIBOT_PROCESSED" ? "Accepted official Feibot timing result" : null),
     },
     canonical: {
@@ -1142,13 +1145,22 @@ export async function getEventAnnouncements(eventIdOrSlug: string): Promise<Plat
 
 export async function getEventCourse(
   eventIdOrSlug: string,
-  options: { surface?: "web" | "mobile"; category?: string | null } = {},
+  options: {
+    surface?: "web" | "mobile";
+    category?: string | null;
+    ticketId?: string | null;
+    contestId?: string | null;
+    includeGeometry?: boolean;
+  } = {},
 ): Promise<PlatformRead<EventCourseView> | null> {
   const event = await getPlatformEvent(eventIdOrSlug);
   if (!event) return null;
   const course = await getPublicEventCourseMaps(event.eventId, {
     surface: options.surface ?? "web",
     category: options.category,
+    ticketId: options.ticketId,
+    contestId: options.contestId,
+    includeGeometry: options.includeGeometry,
   });
   if (!course) return null;
   return {

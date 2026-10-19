@@ -1,4 +1,5 @@
 import type { HubLeg, HubSplit, LiveTrackingHubConfig } from "./live-tracking-hub-config";
+import { normalizeRaceFlowPassages } from "./race-flow-editor";
 
 /** Feibot sometimes returns one generic leg for a triathlon despite sport-specific splits. */
 export function expandFeibotSportLegs(legs: HubLeg[], splits: HubSplit[]) {
@@ -43,6 +44,37 @@ export function expandFeibotSportLegs(legs: HubLeg[], splits: HubSplit[]) {
 }
 
 export function normalizeHubRaceFlowConfig(config: LiveTrackingHubConfig): LiveTrackingHubConfig {
+  const repairedSplits = normalizeRaceFlowPassages(config.splits);
+  if (repairedSplits !== config.splits) config = { ...config, splits: repairedSplits };
+  // Automatic legacy repairs assume one race. Never use one contest's final
+  // split or maximum distance to rewrite another contest's leg mappings.
+  if (new Set(config.splits.map(split => split.providerContestUuid ?? "")).size > 1) return config;
   const flow = expandFeibotSportLegs(config.legs, config.splits);
-  return flow.legs === config.legs ? config : { ...config, legs: flow.legs, splits: flow.splits };
+  const orderedLegs = [...flow.legs].sort((left, right) => left.order - right.order);
+  const sportLegs = orderedLegs.filter((leg) => leg.type === "SWIM" || leg.type === "BIKE" || leg.type === "RUN");
+  const hasTriathlonFlow = ["SWIM", "BIKE", "RUN"].every((type) => sportLegs.some((leg) => leg.type === type));
+  if (!hasTriathlonFlow) return flow.legs === config.legs ? config : { ...config, legs: flow.legs, splits: flow.splits };
+
+  const lastSportLeg = sportLegs.at(-1);
+  const splits = flow.splits.map((split) => split.isFinalRaceSplit === true && lastSportLeg && split.legId !== lastSportLeg.id
+    ? { ...split, legId: lastSportLeg.id }
+    : split);
+  const cumulativeFinishKm = splits.reduce<number | null>((maximum, split) => typeof split.distanceKm === "number"
+    ? Math.max(maximum ?? split.distanceKm, split.distanceKm)
+    : maximum, null);
+  const duplicatedFinishDistance = cumulativeFinishKm != null && sportLegs.filter((leg) => leg.distanceKm === cumulativeFinishKm).length >= 2;
+  let legs = flow.legs;
+  if (duplicatedFinishDistance) {
+    legs = flow.legs.map((leg) => {
+      if (leg.type === "TRANSITION") return { ...leg, distanceKm: null };
+      const distances = splits
+        .filter((split) => split.legId === leg.id && typeof split.distanceKm === "number")
+        .map((split) => split.distanceKm as number);
+      return distances.length >= 2
+        ? { ...leg, distanceKm: Math.max(...distances) - Math.min(...distances) }
+        : leg;
+    });
+  }
+  const changed = legs !== config.legs || splits.some((split, index) => split !== config.splits[index]);
+  return changed ? { ...config, legs, splits } : config;
 }

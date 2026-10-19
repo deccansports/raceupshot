@@ -5,6 +5,14 @@ export interface ResettableVolunteerBikeState {
   bikeRack: string | null;
   updatedAt: string | null;
   updatedBy: string | null;
+  assignedChipCodeAtCheckout?: string | null;
+  returnedChipCode?: string | null;
+  returnedChipFullEpc?: string | null;
+  chipReturnStatus?: string;
+  chipReturnMethod?: string | null;
+  chipReturnReason?: string | null;
+  chipReturnedAt?: string | null;
+  bikeCheckoutTransactionId?: string | null;
 }
 
 export function assertVolunteerBikeCheckInAvailable(state: Pick<ResettableVolunteerBikeState, 'bikeCheckedInAt'>): void {
@@ -26,6 +34,16 @@ export function resetVolunteerBikeCheckIn<T extends ResettableVolunteerBikeState
     bikeCheckedOutAt: null,
     helmetChecked: false,
     bikeRack: null,
+    ...(Object.prototype.hasOwnProperty.call(state, 'assignedChipCodeAtCheckout') ? {
+      assignedChipCodeAtCheckout: null,
+      returnedChipCode: null,
+      returnedChipFullEpc: null,
+      chipReturnStatus: 'PENDING_RETURN',
+      chipReturnMethod: null,
+      chipReturnReason: null,
+      chipReturnedAt: null,
+      bikeCheckoutTransactionId: null,
+    } : {}),
     updatedAt: capturedAt,
     updatedBy: adminName,
   };

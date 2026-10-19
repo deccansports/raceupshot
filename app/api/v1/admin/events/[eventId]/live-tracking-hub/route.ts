@@ -3,6 +3,7 @@ import { apiFailure, apiSuccess } from "@/lib/api-response";
 import { getLiveTrackingHubConfig, saveLiveTrackingHubConfig } from "@/lib/live-tracking-hub-config";
 import { liveTrackingHubConfigSchema } from "@/lib/live-tracking-hub-schema";
 import { persistLiveTrackingSplitIndex, persistStoredFeibotOfficialStart } from "@/lib/feibot-integration";
+import { normalizeRaceFlowPassages } from "@/lib/race-flow-editor";
 
 export const dynamic = "force-dynamic";
 
@@ -18,7 +19,11 @@ export async function GET(_request: Request, { params }: { params: Promise<{ eve
 export async function PUT(request: Request, { params }: { params: Promise<{ eventId: string }> }) {
   const denied = await requireAdmin(); if (denied) return denied;
   try {
-    const parsed = liveTrackingHubConfigSchema.safeParse(await request.json());
+    const input = await request.json();
+    const normalized = input && typeof input === "object" && Array.isArray((input as { splits?: unknown }).splits)
+      ? { ...input, splits: normalizeRaceFlowPassages((input as { splits: Parameters<typeof normalizeRaceFlowPassages>[0] }).splits) }
+      : input;
+    const parsed = liveTrackingHubConfigSchema.safeParse(normalized);
     if (!parsed.success) {
       const issue = parsed.error.issues[0];
       const field = issue?.path?.length ? issue.path.join(".") : "configuration";

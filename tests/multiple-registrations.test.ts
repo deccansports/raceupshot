@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { defaultEventWaiverPolicy } from "@/lib/event-waiver-policy";
+import { defaultEventWaiverPolicy, eventHasWaiverIntent } from "@/lib/event-waiver-policy";
 import { groupRegistrationsByParticipant, validateConsolidatedWaiverSelection, waiverCoversRegistration, type RegistrationIdentity, type WaiverCoverage } from "@/lib/multiple-registrations";
 import { completeRegistrationCheckIn } from "@/lib/volunteer-check-in-state";
 import { participantRegistrationScope } from "@/lib/participant-roster-import";
@@ -11,6 +11,11 @@ const waiver: WaiverCoverage = { waiverId: "W1", participantId: "P100", eventEdi
 const unsignedState = { waiverVerifiedAt: null, waiverResetAt: null, emailOtpVerifiedAt: null, checkedInAt: null, updatedAt: null, updatedBy: null };
 
 describe("multiple registrations, consolidated waiver and event-specific check-in", () => {
+  it("treats a configured waiver version as waiver intent even when the document body is temporarily missing", () => {
+    expect(eventHasWaiverIntent({ waiverHtml: "", waiverVersion: "test 1234" })).toBe(true);
+    expect(eventHasWaiverIntent({ waiverHtml: "<p>Waiver</p>", waiverVersion: "" })).toBe(true);
+    expect(eventHasWaiverIntent({ waiverHtml: "", waiverVersion: "" })).toBe(false);
+  });
   it("TEST 1 accepts two registrations for one participant and email identity is not involved", () => {
     expect(() => validateConsolidatedWaiverSelection([morning, evening], policy)).not.toThrow();
     expect(groupRegistrationsByParticipant([morning, evening])).toEqual([{ participantId: "P100", registrations: [morning, evening] }]);

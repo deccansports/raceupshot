@@ -9,11 +9,13 @@ interface CloudflareEnv {
   BROWSER: BrowserWorker;
   CANONICAL_CHANGE_HUB: DurableObjectNamespace;
   VOLUNTEER_OPERATIONS: DurableObjectNamespace;
+  RFID_WRITE_COORDINATOR: DurableObjectNamespace;
   APP_ENV: string;
   TRANSACTIONAL_NOTIFICATIONS_LIVE_ENABLED?: string;
   ADMIN_EMAIL?: string;
   ADMIN_PASSWORD?: string;
   ADMIN_SESSION_SECRET?: string;
+  RACEUPSHOT_RFID_SIGNING_SECRET?: string;
   ATHLETE_SESSION_SECRET?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;
   CLOUDFLARE_API_TOKEN?: string;

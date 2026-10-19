@@ -134,7 +134,10 @@ export interface ApiErrorEnvelope {
   success: false;
   error: {
     code: string;
+    type?: string;
     message: string;
+    display?: string;
+    retryable?: boolean;
   };
   meta: Pick<ApiMeta, "apiVersion" | "requestId">;
 }
@@ -210,6 +213,7 @@ export interface PublicEvent {
     name: string;
     configurationSource: "MANUAL" | "FEIBOT";
     providerContestUuid: string;
+    enabledDisciplines?: Array<"SWIM" | "BIKE" | "RUN">;
     totalDistanceKm: number | null;
     overallCutoffSeconds: number | null;
     legs: Array<{ id: string; name: string; type: string; order: number; distanceKm: number | null; cutoffSeconds: number | null }>;
@@ -242,6 +246,8 @@ export interface LiveSplit {
 }
 
 export interface LiveParticipant {
+  /** Audited timing corrections replace timing state; never union removed splits back in. */
+  timingCorrectionAt?: string;
   eventId: string;
   participantUid: string;
   athleteUid?: string;
@@ -489,11 +495,16 @@ export interface CourseMapVisibility {
 export interface EventCourseMap {
   mapId: string;
   eventId: string;
+  /** Stable Race Upshot ticket identifier. Category is retained for display and legacy maps. */
+  ticketId?: string;
+  /** Optional timing-provider contest identifier used to resolve tracked athletes. */
+  providerContestUuid?: string;
   category: string;
   mapName: string;
   mapType: CourseMapType;
   customType?: string;
   fileName: string;
+  fileFormat?: "GPX" | "KML";
   gpxUrl?: string;
   gpxData?: string;
   points: CoursePoint[];

@@ -85,6 +85,7 @@ export interface TimingDecision {
 }
 
 export interface ManualTimingOverride {
+  action?: "EDIT" | "DELETE" | "RESTORE";
   overrideId: string;
   participantUuid: string;
   timingPointKey: string;
@@ -364,13 +365,29 @@ function applyOverrides(
   if (!authorized.length) return results;
   const selected = new Map<string, ManualTimingOverride>();
   for (const override of authorized.sort((a, b) => timestampMs(a.appliedAt, "appliedAt") - timestampMs(b.appliedAt, "appliedAt"))) {
-    selected.set(override.timingPointKey, override);
+    if (override.action === "RESTORE") selected.delete(override.timingPointKey);
+    else selected.set(override.timingPointKey, override);
   }
+  if (!selected.size) return results;
   const timestamps = new Map(results.map((result) => [result.timingPointKey, result.readerTimestamp]));
-  for (const [timingPointKey, override] of selected) timestamps.set(timingPointKey, override.readerTimestamp);
+  for (const [timingPointKey, override] of selected) {
+    if (override.action === "DELETE") {
+      if (timingPointKey === configuration.sequence[0]?.timingPointKey) {
+        throw new Error("The accepted race start cannot be deleted. Correct its crossing time instead.");
+      }
+      timestamps.delete(timingPointKey);
+    } else timestamps.set(timingPointKey, override.readerTimestamp);
+  }
   const startPoint = configuration.sequence[0];
   const chipStartTimestamp = timestamps.get(startPoint.timingPointKey);
   if (!chipStartTimestamp) return results;
+  if (selected.get(startPoint.timingPointKey)?.action !== 'DELETE' && selected.has(startPoint.timingPointKey)) {
+    const startMs = timestampMs(chipStartTimestamp, 'chipStartTimestamp');
+    if (startMs < timestampMs(configuration.startWindowOpenTimestamp, 'startWindowOpenTimestamp')
+      || (configuration.startWindowCloseTimestamp && startMs > timestampMs(configuration.startWindowCloseTimestamp, 'startWindowCloseTimestamp'))) {
+      throw new Error('Corrected start must fall inside the configured start window.');
+    }
+  }
   let previousTimestamp: string | null = null;
   const recalculated: OfficialTimingPointResult[] = [];
   for (const point of configuration.sequence) {
@@ -381,6 +398,12 @@ function applyOverrides(
     }
     if (previousTimestamp && timestampMs(readerTimestamp, "readerTimestamp") < timestampMs(previousTimestamp, "previousTimestamp")) {
       throw new Error(`Manual override for ${point.timingPointKey} violates the configured course sequence.`);
+    }
+    if (configuration.eventEndTimestamp && timestampMs(readerTimestamp, 'readerTimestamp') > timestampMs(configuration.eventEndTimestamp, 'eventEndTimestamp')) {
+      throw new Error('Corrected crossing is outside the configured event window.');
+    }
+    if (point.type === 'FINISH' && timestampMs(readerTimestamp, 'readerTimestamp') - timestampMs(chipStartTimestamp, 'chipStartTimestamp') < (configuration.minimumFinishGapMs ?? 0)) {
+      throw new Error('Corrected finish is before the configured minimum finish gap.');
     }
     const automatic = results.find((result) => result.timingPointKey === point.timingPointKey);
     const override = selected.get(point.timingPointKey);

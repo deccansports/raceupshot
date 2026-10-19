@@ -1,6 +1,7 @@
 import openNextWorker from '../.open-next/worker.js';
 export { CanonicalChangeHub } from './canonical-change-hub';
 export { VolunteerOperationCoordinator } from './volunteer-operation-coordinator';
+export { RfidWriteCoordinator } from './rfid-write-coordinator';
 export { DOQueueHandler, DOShardedTagCache, BucketCachePurge } from '../.open-next/worker.js';
 
 const streamPattern = /^\/api\/(?:v1\/)?live\/events\/([^/]+)\/stream\/?$/;

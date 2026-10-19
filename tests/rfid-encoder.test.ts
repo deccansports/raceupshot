@@ -11,8 +11,10 @@ describe("RFID EPC validation and allocation", () => {
 
   it("rejects invalid and unexpectedly sized EPC values", () => {
     expect(() => validateEpc("3008-ZZ")).toThrow(/hexadecimal/i);
-    expect(() => validateEpc("30080", 6)).toThrow(/even number/i);
-    expect(() => validateEpc("300800", 8)).toThrow(/exactly 8/i);
+    expect(() => validateEpc("30080", 6)).toThrow(/16-bit words/i);
+    expect(() => validateEpc("3008", 8)).toThrow(/exactly 8/i);
+    expect(validateEpc("ABCD")).toBe("ABCD");
+    expect(() => validateEpc("AB".repeat(43))).toThrow(/2–42 bytes/i);
   });
 
   it("generates a unique explicit sequence without truncation", () => {

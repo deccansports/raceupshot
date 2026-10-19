@@ -86,6 +86,8 @@ export interface VolunteerOperationLog {
   eventId: string;
   eventName: string;
   participantUid: string;
+  /** Canonical timing-provider identity resolved when the stamp was captured. */
+  canonicalParticipantUid?: string | null;
   bib: string;
   athleteName: string;
   category?: string;
@@ -98,11 +100,23 @@ export interface VolunteerOperationLog {
   reversesOperationId?: string;
   bikeRack?: string | null;
   lockerNumber?: string | null;
+  assignedChipCode?: string | null;
+  returnedChipCode?: string | null;
+  returnedChipFullEpc?: string | null;
+  chipReturnStatus?: "PENDING_RETURN" | "RETURNED" | "NOT_RETURNED" | "NO_CHIP_ASSIGNED";
+  chipReturnMethod?: "CAMERA" | "RFID" | "MANUAL" | "OVERRIDE" | "NO_CHIP_ASSIGNED" | null;
+  chipReturnReason?: string | null;
+  bikeCheckoutTransactionId?: string | null;
   timingPointName?: string;
   timingMode?: "GUN" | "TIMING_POINT";
   gunStartAt?: string | null;
   gunElapsedSeconds?: number | null;
   gunTime?: string | null;
+  elapsedStartAt?: string | null;
+  elapsedStartSource?: "CHIP" | "GUN" | null;
+  elapsedSeconds?: number | null;
+  elapsedTime?: string | null;
+  canReset?: boolean;
   capturedAt: string;
   serverReceivedAt?: string;
   deviceTimeZone?: string;
@@ -118,15 +132,40 @@ export interface VolunteerOperationLog {
   rankingStartAt?: string | null;
   rankingEndAt?: string | null;
   rankingElapsedMilliseconds?: number | null;
-  rankingStartSource?: "CANONICAL" | "SAVED_GUN" | null;
+  rankingChipElapsedMilliseconds?: number | null;
+  rankingGunElapsedMilliseconds?: number | null;
+  manualChipElapsedMilliseconds?: number | null;
+  manualGunElapsedMilliseconds?: number | null;
+  rankingResultSource?: "CANONICAL" | "MANUAL" | null;
+  rankingStartSource?: "CANONICAL" | "SAVED_CHIP" | "SAVED_GUN" | null;
 }
 
 export interface VolunteerEventOption {
   id: string;
   name: string;
+  categories: string[];
   providerEventUuid: string | null;
   contestUuids: string[];
   timingPoints: Array<{ id: string; name: string; type: "START" | "SPLIT" | "FINISH" }>;
+}
+
+function normalizedEventIdentity(value: string | null | undefined): string {
+  return (value ?? "").trim().toLocaleLowerCase("en-IN").replace(/[^a-z0-9]+/g, "");
+}
+
+/**
+ * Event IDs are authoritative. Provider UUID and event-name matching preserve
+ * assignments created before an event record was re-keyed or re-imported.
+ */
+export function volunteerAssignmentMatchesEvent(
+  assignment: Pick<VolunteerAssignment, "eventId" | "eventName" | "providerEventUuid">,
+  event: Pick<VolunteerEventOption, "id" | "name" | "providerEventUuid">,
+): boolean {
+  if (assignment.eventId.trim() === event.id.trim()) return true;
+  if (assignment.providerEventUuid && event.providerEventUuid
+    && assignment.providerEventUuid.trim() === event.providerEventUuid.trim()) return true;
+  const assignmentName = normalizedEventIdentity(assignment.eventName);
+  return Boolean(assignmentName && assignmentName === normalizedEventIdentity(event.name));
 }
 
 const assignmentInput = z.object({
@@ -213,6 +252,11 @@ export async function listVolunteerEventOptions(): Promise<VolunteerEventOption[
     return {
       id: event.id,
       name: event.name,
+      categories: [...new Set([
+        ...(event.ticketDefinitions ?? []).map((ticket) => ticket.name),
+        ...(event.tickets ?? []).map((ticket) => ticket.name),
+        ...(event.categories ?? []),
+      ].map((category) => category.trim()).filter(Boolean))],
       providerEventUuid: settings?.timingIntegration?.providerEventUuid || null,
       contestUuids: [...new Set((hub?.contestMappings ?? []).map((mapping) => mapping.providerContestUuid).filter(Boolean))],
       timingPoints: (hub?.timingPoints ?? [])
@@ -450,18 +494,29 @@ function validTimestamp(value: string | null | undefined): number | null {
   return Number.isFinite(milliseconds) ? milliseconds : null;
 }
 
-function canonicalStart(participant: LiveParticipant | undefined): { milliseconds: number; value: string } | null {
-  if (!participant) return null;
-  const firstValid = (values: Array<string | null | undefined>) => values
+function firstValidTimestamp(values: Array<string | null | undefined>): { milliseconds: number; value: string } | null {
+  return values
     .map((value) => ({ value: value || "", milliseconds: validTimestamp(value) }))
     .find((candidate): candidate is { value: string; milliseconds: number } => candidate.milliseconds !== null) ?? null;
-  const chipStart = firstValid(participant.splits.map((split) => split.chipStartTimestamp));
-  if (chipStart) return chipStart;
-  const gunStart = firstValid(participant.splits.map((split) => split.gunStartTimestamp));
-  if (gunStart) return gunStart;
-  return firstValid(participant.splits
-    .filter((split) => /(^|[^a-z])start([^a-z]|$)/i.test(`${split.splitId} ${split.name}`))
-    .flatMap((split) => [split.readerTimestamp, split.timestamp]));
+}
+
+function canonicalStarts(participant: LiveParticipant | undefined): {
+  chip: { milliseconds: number; value: string } | null;
+  gun: { milliseconds: number; value: string } | null;
+} {
+  if (!participant) return { chip: null, gun: null };
+  const chip = firstValidTimestamp(participant.splits.map((split) => split.chipStartTimestamp));
+  const gun = firstValidTimestamp(participant.splits.map((split) => split.gunStartTimestamp))
+    ?? firstValidTimestamp(participant.splits
+      .filter((split) => /(^|[^a-z])start([^a-z]|$)/i.test(`${split.splitId} ${split.name}`))
+      .flatMap((split) => [split.readerTimestamp, split.timestamp]));
+  return { chip, gun };
+}
+
+function canonicalStart(participant: LiveParticipant | undefined): { milliseconds: number; value: string } | null {
+  if (!participant) return null;
+  const starts = canonicalStarts(participant);
+  return starts.chip ?? starts.gun;
 }
 
 function durationMilliseconds(value: string | null | undefined): number | null {
@@ -471,27 +526,78 @@ function durationMilliseconds(value: string | null | undefined): number | null {
   return parts.reduce((seconds, part) => seconds * 60 + part, 0) * 1_000;
 }
 
+function canonicalResultAtTimingPoint(participant: LiveParticipant | undefined, timingPointName: string | undefined) {
+  if (!participant) return null;
+  const wanted = normalizedEventIdentity(timingPointName);
+  const hasElapsed = (split: LiveParticipant["splits"][number]) => (Number.isFinite(split.chipTimeMs) && split.chipTimeMs! >= 0)
+    || (Number.isFinite(split.gunTimeMs) && split.gunTimeMs! >= 0)
+    || durationMilliseconds(split.splitTime) !== null;
+  const exact = participant.splits.find((split) => hasElapsed(split)
+    && (normalizedEventIdentity(split.name) === wanted || normalizedEventIdentity(split.splitId) === wanted));
+  const split = exact ?? (/finish/.test(wanted)
+    ? participant.splits.toReversed().find((candidate) => hasElapsed(candidate) && /finish/.test(normalizedEventIdentity(candidate.name)))
+    : undefined);
+  if (!split) return null;
+  const starts = canonicalStarts(participant);
+  const readMilliseconds = validTimestamp(split.readerTimestamp) ?? validTimestamp(split.timestamp);
+  const storedChip = Number.isFinite(split.chipTimeMs) && split.chipTimeMs! >= 0 ? split.chipTimeMs! : durationMilliseconds(split.splitTime);
+  const storedGun = Number.isFinite(split.gunTimeMs) && split.gunTimeMs! >= 0 ? split.gunTimeMs! : null;
+  const chipElapsed = storedChip ?? (readMilliseconds !== null && starts.chip ? readMilliseconds - starts.chip.milliseconds : null);
+  const gunElapsed = storedGun ?? (readMilliseconds !== null && starts.gun ? readMilliseconds - starts.gun.milliseconds : null);
+  if ((chipElapsed === null || chipElapsed < 0) && (gunElapsed === null || gunElapsed < 0)) return null;
+  return {
+    chipElapsed: chipElapsed !== null && chipElapsed >= 0 ? chipElapsed : null,
+    gunElapsed: gunElapsed !== null && gunElapsed >= 0 ? gunElapsed : null,
+    readAt: readMilliseconds === null ? null : new Date(readMilliseconds).toISOString(),
+  };
+}
+
 export function rankVolunteerManualTiming(
   rows: VolunteerOperationLog[],
   participantsByEvent: ReadonlyMap<string, readonly LiveParticipant[]>,
 ): VolunteerOperationLog[] {
   const participantsByIdentity = new Map<string, LiveParticipant>();
+  const participantsByEventAndBib = new Map<string, LiveParticipant[]>();
   for (const [eventId, participants] of participantsByEvent) {
     for (const participant of participants) {
       participantsByIdentity.set(`${eventId}\u0000${participant.participantUid}`, participant);
+      const bibKey = `${eventId}\u0000${participant.bib.trim().toLowerCase()}`;
+      participantsByEventAndBib.set(bibKey, [...(participantsByEventAndBib.get(bibKey) ?? []), participant]);
     }
   }
+  const resolveParticipant = (row: VolunteerOperationLog): LiveParticipant | undefined => {
+    const explicitIdentity = row.canonicalParticipantUid?.trim() || row.participantUid.trim();
+    const exact = participantsByIdentity.get(`${row.eventId}\u0000${explicitIdentity}`);
+    if (exact) return exact;
+
+    // Legacy roster stamps did not persist the provider UUID. Recover them only
+    // when both the event BIB and contest/category identify one canonical row.
+    if (!row.bib.trim()) return undefined;
+    const bibMatches = participantsByEventAndBib.get(`${row.eventId}\u0000${row.bib.trim().toLowerCase()}`) ?? [];
+    if (bibMatches.length === 1) return bibMatches[0];
+    const category = normalizedEventIdentity(row.category);
+    if (!category) return undefined;
+    const contestMatches = bibMatches.filter((participant) => category === normalizedEventIdentity(participant.contestId)
+      || category === normalizedEventIdentity(participant.contestName));
+    return contestMatches.length === 1 ? contestMatches[0] : undefined;
+  };
   const resetOperationIds = new Set(rows
     .filter((row) => row.action === "MANUAL_TIMING_RESET" && row.reversesOperationId)
     .map((row) => row.reversesOperationId as string));
   const enriched = rows.map((row) => {
-    const participant = participantsByIdentity.get(`${row.eventId}\u0000${row.participantUid}`);
+    const participant = resolveParticipant(row);
     if (row.action !== "MANUAL_TIMING_CAPTURED") return { ...row, overallRank: null, categoryRank: null, genderRank: null, ageGroupRank: null };
     const endMilliseconds = validTimestamp(row.capturedAt);
     if (endMilliseconds === null) return { ...row, overallRank: null, categoryRank: null, genderRank: null, ageGroupRank: null };
     const canonical = canonicalStart(participant);
-    const savedGunMilliseconds = validTimestamp(row.gunStartAt);
-    const canonicalIsUsable = canonical !== null && canonical.milliseconds <= endMilliseconds;
+    const canonicalTimes = canonicalStarts(participant);
+    const canonicalResult = canonicalResultAtTimingPoint(participant, row.timingPointName);
+    const savedChipMilliseconds = row.elapsedStartSource === "CHIP" ? validTimestamp(row.elapsedStartAt) : null;
+    const savedGunMilliseconds = validTimestamp(row.gunStartAt)
+      ?? (row.elapsedStartSource === "GUN" ? validTimestamp(row.elapsedStartAt) : null);
+    const canonicalIsUsable = canonical !== null && canonical.milliseconds <= endMilliseconds
+      && !(row.elapsedStartSource === "CHIP" && savedGunMilliseconds !== null
+        && !participant?.splits.some(split => validTimestamp(split.chipStartTimestamp) !== null));
     const savedGunIsUsable = savedGunMilliseconds !== null && savedGunMilliseconds <= endMilliseconds;
     const fallbackDuration = typeof row.gunElapsedSeconds === "number" && Number.isFinite(row.gunElapsedSeconds)
       ? Math.max(0, row.gunElapsedSeconds * 1_000)
@@ -503,26 +609,43 @@ export function rankVolunteerManualTiming(
         : fallbackDuration !== null
           ? endMilliseconds - fallbackDuration
           : null;
-    const startSource = canonicalIsUsable ? "CANONICAL" as const : startMilliseconds !== null ? "SAVED_GUN" as const : null;
+    const startSource = canonicalIsUsable ? "CANONICAL" as const : startMilliseconds !== null ? row.elapsedStartSource === "CHIP" ? "SAVED_CHIP" as const : "SAVED_GUN" as const : null;
+    const manualChipElapsed = (canonicalTimes.chip?.milliseconds ?? savedChipMilliseconds) !== null
+      && (canonicalTimes.chip?.milliseconds ?? savedChipMilliseconds)! <= endMilliseconds
+      ? endMilliseconds - (canonicalTimes.chip?.milliseconds ?? savedChipMilliseconds)!
+      : null;
+    const manualGunElapsed = (canonicalTimes.gun?.milliseconds ?? savedGunMilliseconds) !== null
+      && (canonicalTimes.gun?.milliseconds ?? savedGunMilliseconds)! <= endMilliseconds
+      ? endMilliseconds - (canonicalTimes.gun?.milliseconds ?? savedGunMilliseconds)!
+      : fallbackDuration;
+    const rankingElapsed = canonicalResult?.chipElapsed ?? canonicalResult?.gunElapsed
+      ?? (startMilliseconds === null ? null : Math.max(0, endMilliseconds - startMilliseconds));
     return {
       ...row,
       category: row.category || participant?.contestName || "",
       gender: row.gender || participant?.gender || "",
       ageGroup: row.ageGroup || participant?.ageGroup || "",
-      overallRank: null,
-      categoryRank: null,
-      genderRank: null,
-      ageGroupRank: null,
+      overallRank: canonicalResult ? participant?.overallRank ?? null : null,
+      categoryRank: canonicalResult ? participant?.overallRank ?? null : null,
+      genderRank: canonicalResult ? participant?.genderRank ?? null : null,
+      ageGroupRank: canonicalResult ? participant?.ageGroupRank ?? null : null,
       rankingStartAt: startMilliseconds === null ? null : new Date(startMilliseconds).toISOString(),
-      rankingEndAt: new Date(endMilliseconds).toISOString(),
-      rankingElapsedMilliseconds: startMilliseconds === null ? null : Math.max(0, endMilliseconds - startMilliseconds),
+      rankingEndAt: canonicalResult?.readAt ?? new Date(endMilliseconds).toISOString(),
+      rankingElapsedMilliseconds: rankingElapsed,
+      // Never blend a device stamp calculation into fields presented as
+      // canonical timing. Keep both sources independently auditable.
+      rankingChipElapsedMilliseconds: canonicalResult?.chipElapsed ?? null,
+      rankingGunElapsedMilliseconds: canonicalResult?.gunElapsed ?? null,
+      manualChipElapsedMilliseconds: manualChipElapsed,
+      manualGunElapsedMilliseconds: manualGunElapsed,
+      rankingResultSource: canonicalResult ? "CANONICAL" as const : "MANUAL" as const,
       rankingStartSource: startSource,
     };
   });
   const rankedById = new Map(enriched.map((row) => [row.id, row]));
   const active = enriched.flatMap((row) => {
-    if (row.action !== "MANUAL_TIMING_CAPTURED" || resetOperationIds.has(row.id) || row.rankingElapsedMilliseconds === null || row.rankingElapsedMilliseconds === undefined) return [];
-    const participant = participantsByIdentity.get(`${row.eventId}\u0000${row.participantUid}`);
+    if (row.action !== "MANUAL_TIMING_CAPTURED" || row.rankingResultSource === "CANONICAL" || resetOperationIds.has(row.id) || row.rankingElapsedMilliseconds === null || row.rankingElapsedMilliseconds === undefined) return [];
+    const participant = resolveParticipant(row);
     const contest = participant?.contestId?.trim() || participant?.contestName?.trim().toLowerCase() || "__event__";
     const timingPoint = row.timingPointName?.trim().toLowerCase() || "__manual_finish__";
     return [{ row, participant, baseGroup: `${row.eventId}\u0000${contest}\u0000${timingPoint}` }];
@@ -590,6 +713,7 @@ export async function resetVolunteerManualTimingOperation(id: string): Promise<V
     eventId: original.eventId,
     eventName: original.eventName,
     participantUid: original.participantUid,
+    canonicalParticipantUid: original.canonicalParticipantUid,
     bib: original.bib,
     athleteName: original.athleteName,
     volunteerId: "admin",
@@ -601,6 +725,10 @@ export async function resetVolunteerManualTimingOperation(id: string): Promise<V
     gunStartAt: original.gunStartAt,
     gunElapsedSeconds: original.gunElapsedSeconds,
     gunTime: original.gunTime,
+    elapsedStartAt: original.elapsedStartAt,
+    elapsedStartSource: original.elapsedStartSource,
+    elapsedSeconds: original.elapsedSeconds,
+    elapsedTime: original.elapsedTime,
     capturedAt: new Date().toISOString(),
     status: "RESET BY ADMIN",
   });

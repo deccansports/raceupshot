@@ -38,6 +38,9 @@ All endpoints require `Authorization: Bearer <RU5600_BRIDGE_TOKEN>`.
 - `POST /v1/inventory/start`
 - `GET /v1/inventory/poll`
 - `POST /v1/inventory/stop`
+- `POST /v1/configuration` with the detection profile (target range, desired RF power, antenna IDs, absence timeout, RSSI filter and calibration evidence)
 - `POST /v1/write-epc` with `{ "currentEpc": "...", "requestedEpc": "...", "accessPassword": "00000000" }`
 
 Access passwords are used in memory only and deliberately excluded from audit records.
+
+`/v1/configuration` reports which controls were actually applied. This audited SDK wrapper currently applies antenna/RSSI filtering in the application presence layer but does not claim hardware RF-power control. A six-inch target requires physical antenna/power/shielding calibration and measured acceptance testing.

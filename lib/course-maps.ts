@@ -47,6 +47,8 @@ export async function saveEventCourseMaps(eventIdOrSlug: string, maps: EventCour
     return {
       ...map,
       eventId: event.id,
+      ticketId: map.ticketId?.trim() || undefined,
+      providerContestUuid: map.providerContestUuid?.trim() || undefined,
       category: map.category.trim(),
       mapName: map.mapName.trim(),
       customType: map.customType?.trim() || undefined,
@@ -65,18 +67,33 @@ export async function saveEventCourseMaps(eventIdOrSlug: string, maps: EventCour
 
 export async function getPublicEventCourseMaps(
   eventIdOrSlug: string,
-  options: { surface: "web" | "mobile"; category?: string | null } = { surface: "web" },
+  options: {
+    surface: "web" | "mobile";
+    category?: string | null;
+    ticketId?: string | null;
+    contestId?: string | null;
+    includeGeometry?: boolean;
+  } = { surface: "web" },
 ): Promise<EventCourseView | null> {
   const collection = await getAdminEventCourseMaps(eventIdOrSlug);
   if (!collection) return null;
-  const visible = collection.maps.filter((map) =>
-    map.visibility.public
-    && (options.surface === "web" ? map.visibility.web : map.visibility.mobile)
-    && (!options.category || map.category.toLowerCase() === options.category.toLowerCase()),
-  ).map((storedMap) => {
+  const normalize = (value: string | null | undefined) => (value ?? "").trim().normalize("NFKC").toLowerCase().replace(/[\s_-]+/g, "");
+  const requestedIds = [options.ticketId, options.contestId].map(normalize).filter(Boolean);
+  const requestedCategory = normalize(options.category);
+  const hasExactIdMatch = requestedIds.length > 0 && collection.maps.some((map) =>
+    [map.ticketId, map.providerContestUuid].map(normalize).some((alias) => requestedIds.includes(alias)),
+  );
+  const onlyOneCategory = new Set(collection.maps.map((map) => normalize(map.category)).filter(Boolean)).size === 1;
+  const visible = collection.maps.filter((map) => {
+    if (!map.visibility.public || (options.surface === "web" ? !map.visibility.web : !map.visibility.mobile)) return false;
+    if (hasExactIdMatch) return [map.ticketId, map.providerContestUuid].map(normalize).some((alias) => requestedIds.includes(alias));
+    if (requestedCategory) return normalize(map.category) === requestedCategory;
+    if (requestedIds.length) return onlyOneCategory;
+    return true;
+  }).map((storedMap) => {
     const { gpxData, ...map } = storedMap;
     void gpxData;
-    return map;
+    return options.includeGeometry === false ? { ...map, points: [] } : map;
   });
   const categories = [...new Set(visible.map((map) => map.category))];
   return {

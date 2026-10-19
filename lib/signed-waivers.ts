@@ -14,6 +14,7 @@ import { getEventBySlug, getEvents } from "./raceupshot-repository";
 import type { VolunteerOperationLog } from "./volunteer-management";
 import { renderWaiverTemplate, type WaiverParameterMapping } from "./waiver-template";
 import { eventDocumentSrcDoc } from "./event-document";
+import { sendAiSensyOtpWhatsApp } from "./aisensy-whatsapp";
 
 const PREFIX = "raceupshot:waivers";
 const OTP_SECONDS = 5 * 60;
@@ -587,14 +588,25 @@ export async function requestWaiverOtp(input: {
     createdAt: now, expiresAt: now + OTP_SECONDS, attempts: 0,
   };
   await kv.put(key, JSON.stringify(record), { expirationTtl: OTP_SECONDS + 60 });
-  const delivery = await sendBergtecnoEmail({
-    recipientEmail: email,
-    subject: `${code} is your ${event.name} waiver verification code`,
-    html: textToEmailHtml(`Hello ${signatureName},\n\nUse OTP ${code} to electronically sign the ${event.name} waiver. This code expires in 5 minutes.\n\nIf you did not request this, do not share the code.`),
-    singleAttempt: true,
-  });
-  if (!delivery.sent) { await kv.delete(key); throw new Error(delivery.error || "The waiver OTP email could not be sent."); }
-  return { requested: true, participantId: registration.participantId, expiresInSeconds: OTP_SECONDS };
+  const mobile = value(registration.row, "mobile", "mobileNumber", "phone", "phoneNumber", "contactNumber");
+  const [whatsapp, emailDelivery] = await Promise.all([
+    sendAiSensyOtpWhatsApp({ recipientPhone: mobile, recipientName: signatureName, otp: code }),
+    sendBergtecnoEmail({
+      recipientEmail: email,
+      subject: `${code} is your ${event.name} waiver verification code`,
+      html: textToEmailHtml(`Hello ${signatureName},\n\nUse OTP ${code} to electronically sign the ${event.name} waiver. This code expires in 5 minutes.\n\nIf you did not request this, do not share the code.`),
+      singleAttempt: true,
+    }),
+  ]);
+  if (!whatsapp.accepted && !emailDelivery.sent) { await kv.delete(key); throw new Error(whatsapp.error || emailDelivery.error || "The waiver OTP could not be sent."); }
+  const channels = [emailDelivery.sent ? "email" : "", whatsapp.accepted ? "WhatsApp" : ""].filter(Boolean).join(" and ");
+  return {
+    requested: true,
+    participantId: registration.participantId,
+    expiresInSeconds: OTP_SECONDS,
+    channel: whatsapp.accepted && emailDelivery.sent ? "BOTH" : whatsapp.accepted ? "WHATSAPP" : "EMAIL",
+    message: `Verification OTP sent by ${channels}. ${whatsapp.accepted ? "Use the WhatsApp copy-code button or enter the code manually." : ""}`.trim(),
+  };
 }
 
 export async function verifyAndSignWaiver(input: {

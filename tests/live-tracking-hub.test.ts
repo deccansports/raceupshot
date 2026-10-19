@@ -137,6 +137,29 @@ describe("Live Tracking Hub configuration", () => {
     expect(imported.legs.map((leg) => leg.type)).toEqual(["SWIM", "BIKE", "RUN"]);
   });
 
+  it("repairs saved cumulative finish distances and a finish assigned to swim", () => {
+    const legs = ["SWIM", "TRANSITION", "BIKE", "TRANSITION", "RUN"].map((type, order) => ({
+      id: `leg-${order}`,
+      name: type,
+      type: type as "SWIM" | "TRANSITION" | "BIKE" | "RUN",
+      order,
+      distanceKm: 51.5,
+    }));
+    const splits = [
+      ["SWIM START", "leg-0", 0, false], ["SWIM FINISH", "leg-0", 1.5, false],
+      ["BIKE START", "leg-2", 1.5, false], ["BIKE FINISH", "leg-2", 41.5, false],
+      ["RUN START", "leg-4", 41.5, false], ["RUN 5K", "leg-4", 46.5, false],
+      ["FINISH", "leg-0", 51.5, true],
+    ].map(([name, legId, distanceKm, isFinalRaceSplit], order) => ({
+      id: `split-${order}`, name: String(name), importedName: String(name), legId: String(legId), order,
+      distanceKm: Number(distanceKm), timingPointId: null, passage: 1, cutoffSeconds: null, isFinalRaceSplit: Boolean(isFinalRaceSplit),
+    }));
+
+    const config = normalizeHubRaceFlowConfig({ ...defaultLiveTrackingHubConfig("event-1"), legs, splits });
+    expect(config.legs.map((leg) => leg.distanceKm)).toEqual([1.5, null, 40, null, 10]);
+    expect(config.splits.at(-1)).toMatchObject({ name: "FINISH", legId: "leg-4", isFinalRaceSplit: true });
+  });
+
   it("honors sport names on separate Feibot legs", () => {
     const rules = parseFeibotTimingRules({
       legs: ["Swim", "Bike", "Run"].map((name, index) => ({ leg_uuid: `leg-${index}`, leg_name: name })),
@@ -144,6 +167,30 @@ describe("Live Tracking Hub configuration", () => {
     });
     expect(rules.legs.map((leg) => leg.type)).toEqual(["SWIM", "BIKE", "RUN"]);
     expect(rules.splits.map((split) => split.legId)).toEqual(["leg-0", "leg-1", "leg-2"]);
+  });
+
+  it("derives per-sport distance from cumulative triathlon splits", () => {
+    const rules = parseFeibotTimingRules({
+      legs: ["Swim", "Transition 1", "Bike", "Transition 2", "Run"].map((name, index) => ({
+        leg_uuid: `leg-${index}`,
+        leg_name: name,
+        contest_uuid: "triathlon",
+      })),
+      splits: [
+        ["SWIM START", 0], ["SWIM FINISH", 1.5],
+        ["BIKE START", 1.5], ["BIKE 20 KM", 21.5], ["BIKE FINISH", 41.5],
+        ["RUN START", 41.5], ["RUN 5K", 46.5], ["FINISH", 51.5],
+      ].map(([name, distance], index) => ({
+        split_uuid: `split-${index}`,
+        split_name: name,
+        contest_uuid: "triathlon",
+        split_index: index + 1,
+        distance_from_start: distance,
+      })),
+    });
+
+    expect(rules.legs.map((leg) => leg.distanceKm)).toEqual([1.5, null, 40, null, 10]);
+    expect(rules.splits.at(-1)).toMatchObject({ name: "FINISH", legId: "leg-4", isFinalRaceSplit: true });
   });
 
   it("normalizes Feibot cloud timing rules with provider-cased fields", () => {

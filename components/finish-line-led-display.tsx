@@ -3,7 +3,8 @@
 
 import type { FinishLineLedFeed, FinishLineLedFinisher } from "@/lib/finish-line-led";
 import { getCountryFlagFromValue } from "@/lib/countries";
-import { Maximize, Radio, RefreshCw } from "lucide-react";
+import { LED_FIELD_LABELS, ledGridColumns, normalizeLedFields, type LedField } from "@/lib/finish-line-led-fields";
+import { Maximize, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 const ROWS_PER_PAGE = 3;
@@ -11,9 +12,22 @@ const ROWS_PER_PAGE = 3;
 export function rollFinishers<T extends { id: string }>(previous: T[], incoming: T[]): { finishers: T[]; newIds: string[] } {
   const previousIds = new Set(previous.map((row) => row.id));
   const incomingById = new Map(incoming.map((row) => [row.id, row]));
-  const newest = incoming.filter((row) => !previousIds.has(row.id));
-  const older = previous.map((row) => incomingById.get(row.id)).filter((row): row is T => row !== undefined);
+  const newest = [...incomingById.values()].filter((row) => !previousIds.has(row.id));
+  const older = [...previousIds].map((id) => incomingById.get(id)).filter((row): row is T => row !== undefined);
   return { finishers: [...newest, ...older], newIds: newest.map((row) => row.id) };
+}
+
+export function latestVisibleFinishers<T extends { id: string }>(finishers: T[]): T[] {
+  return [...new Map(finishers.map((row) => [row.id, row])).values()].slice(0, ROWS_PER_PAGE);
+}
+
+export function LedFinisherField({ finisher, field }: { finisher: FinishLineLedFinisher; field: LedField }) {
+  if (field === "flag") return <span className="finish-led-flag" aria-label={finisher.country || "Country unavailable"}>{getCountryFlagFromValue(finisher.country) || "🏁"}</span>;
+  if (field === "name") return <div className="finish-led-athlete"><strong>{finisher.name}</strong></div>;
+  if (field === "bib") return <strong className="finish-led-bib">{finisher.bib || "—"}</strong>;
+  if (field === "finishTime") return <time>{finishLineChipTime(finisher.finishTime)}</time>;
+  if (field === "status") return <em>FINISHED</em>;
+  return <strong className="finish-led-group">{(field === "gender" ? finisher.gender.trim().toUpperCase() : finisher[field]) || "—"}</strong>;
 }
 
 export function athleteBand(finisher: Pick<FinishLineLedFinisher, "gender" | "ageGroup">): string {
@@ -51,9 +65,7 @@ export function FinishLineLedDisplay({ initialFeed }: { initialFeed: FinishLineL
   const [refreshing, setRefreshing] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const [idleSlideIndex, setIdleSlideIndex] = useState(0);
-  const [pageIndex, setPageIndex] = useState(0);
   const [newArrivalIds, setNewArrivalIds] = useState<string[]>([]);
-  const lastArrivalAtRef = useRef(0);
   const rollingRef = useRef<HTMLDivElement>(null);
   const rowPositionsRef = useRef(new Map<string, number>());
 
@@ -67,8 +79,6 @@ export function FinishLineLedDisplay({ initialFeed }: { initialFeed: FinishLineL
       const nextFeed = { ...body.data, finishers: rolled.finishers };
       feedRef.current = nextFeed;
       if (rolled.newIds.length) {
-        lastArrivalAtRef.current = Date.now();
-        setPageIndex(0);
         setNewArrivalIds(rolled.newIds);
       }
       setFeed(nextFeed);
@@ -97,20 +107,9 @@ export function FinishLineLedDisplay({ initialFeed }: { initialFeed: FinishLineL
     return () => window.clearTimeout(timer);
   }, [newArrivalIds]);
 
-  const totalPages = Math.max(1, Math.ceil(feed.finishers.length / ROWS_PER_PAGE));
-  const normalizedPageIndex = pageIndex % totalPages;
-  useEffect(() => {
-    const interval = window.setInterval(() => {
-      if (Date.now() - lastArrivalAtRef.current < feed.display.finisherRotationSeconds * 1000) return;
-      setPageIndex((index) => (index + 1) % totalPages);
-    }, feed.display.finisherRotationSeconds * 1000);
-    return () => window.clearInterval(interval);
-  }, [feed.display.finisherRotationSeconds, totalPages]);
-
-  const visibleFinishers = useMemo(() => {
-    const start = normalizedPageIndex * ROWS_PER_PAGE;
-    return feed.finishers.slice(start, start + ROWS_PER_PAGE);
-  }, [feed.finishers, normalizedPageIndex]);
+  const visibleFinishers = useMemo(() => latestVisibleFinishers(feed.finishers), [feed.finishers]);
+  const fields = normalizeLedFields(feed.display.visibleFields);
+  const gridStyle = { gridTemplateColumns: ledGridColumns(fields) };
 
   useLayoutEffect(() => {
     const elements = Array.from(rollingRef.current?.querySelectorAll<HTMLElement>("article[data-finisher-id]") ?? []);
@@ -144,39 +143,25 @@ export function FinishLineLedDisplay({ initialFeed }: { initialFeed: FinishLineL
   const eventFinished = Number.isFinite(eventEndedAt) && now >= eventEndedAt;
 
   return (
-    <main className="finish-led-screen">
-      <header className="finish-led-header">
-        <div className="finish-led-brand">
-          {feed.event.logoUrl ? <img src={feed.event.logoUrl} alt={`${feed.event.name} logo`} /> : <div className="finish-led-mark">RU</div>}
-          <div><span>FINISH LINE</span><h1>{feed.event.name}</h1><p>{feed.event.location}</p></div>
-        </div>
-        <div className="finish-led-actions">
-          <span><Radio /> LIVE FINISHES</span>
+    <main className="finish-led-screen finish-led-screen-clean">
+        <div className="finish-led-actions finish-led-operator-controls">
           <button type="button" aria-label="Refresh finishers" onClick={() => void refresh(true)} disabled={refreshing}><RefreshCw /></button>
-          <button type="button" aria-label="Open full screen" onClick={() => void document.documentElement.requestFullscreen()}><Maximize /></button>
+          <button type="button" aria-label="Open full screen" onClick={() => {
+            if (!document.documentElement.requestFullscreen) { setError("Fullscreen is unavailable in this browser."); return; }
+            void document.documentElement.requestFullscreen().catch(() => setError("Unable to open fullscreen. Please try again."));
+          }}><Maximize /></button>
         </div>
-      </header>
 
       {feed.finishers.length ? (
         <section className="finish-led-results" aria-live="polite">
-          <div className="finish-led-results-title">
-            <div><span>OFFICIAL LIVE RESULTS</span><h2>FINISHERS</h2></div>
-            <strong>{feed.finishers.length}</strong>
-          </div>
-          <div className="finish-led-grid finish-led-grid-head"><span>PLACE</span><span>BIB</span><span>ATHLETE</span><span>GROUP</span><span>CHIP TIME</span><span>STATUS</span></div>
-          <div className="finish-led-rolling" key={normalizedPageIndex} ref={rollingRef}>
-            {visibleFinishers.map((finisher, index) => (
-              <article className="finish-led-grid" data-finisher-id={finisher.id} key={finisher.id}>
-                <b>{finisher.rank || normalizedPageIndex * ROWS_PER_PAGE + index + 1}</b>
-                <strong className="finish-led-bib">{finisher.bib || "—"}</strong>
-                <div className="finish-led-athlete"><i>{getCountryFlagFromValue(finisher.country) || "🏁"}</i><span><strong>{finisher.name}</strong><small>{finisher.country || "IN"}</small></span></div>
-                <strong className="finish-led-group">{athleteBand(finisher)}</strong>
-                <time>{finishLineChipTime(finisher.finishTime)}</time>
-                <em>FINISHED</em>
+          <div className="finish-led-grid finish-led-grid-head" style={gridStyle}>{fields.map((field) => <span key={field}>{LED_FIELD_LABELS[field].toUpperCase()}</span>)}</div>
+          <div className="finish-led-rolling" ref={rollingRef}>
+            {visibleFinishers.map((finisher) => (
+              <article className="finish-led-grid" style={gridStyle} data-finisher-id={finisher.id} key={finisher.id}>
+                {fields.map((field) => <LedFinisherField key={field} field={field} finisher={finisher} />)}
               </article>
             ))}
           </div>
-          {totalPages > 1 && <div className="finish-led-pages">{Array.from({ length: totalPages }, (_, index) => <i className={index === normalizedPageIndex ? "active" : ""} key={index} />)}</div>}
         </section>
       ) : (
         <section className="finish-led-idle" aria-live="polite">
@@ -196,11 +181,7 @@ export function FinishLineLedDisplay({ initialFeed }: { initialFeed: FinishLineL
         </section>
       )}
 
-      <footer className="finish-led-footer">
-        <strong>RACE UPSHOT</strong>
-        <span>{error || (feed.finishers.length ? "ROLLING LIVE FINISHES" : eventFinished ? "EVENT FINISHED" : "TIMING IN PROGRESS")}</span>
-        <small>{feed.updatedAt ? `Updated ${new Date(feed.updatedAt).toLocaleTimeString("en-IN")}` : "Connected to live timing"}</small>
-      </footer>
+      {error && <div className="finish-led-connection-error" role="status">{error} Showing the last loaded timing.</div>}
     </main>
   );
 }

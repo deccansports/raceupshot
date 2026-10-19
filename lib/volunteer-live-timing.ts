@@ -3,6 +3,7 @@ import { getCanonicalLiveEvent } from "./canonical-live-tracking";
 import { getLiveTrackingHubConfig, type LiveTrackingHubConfig } from "./live-tracking-hub-config";
 import type { VolunteerProfile } from "./volunteer-management";
 import { activeAssignment, requireModule } from "./volunteer-operations";
+import { resolveVolunteerTimingState } from "./volunteer-timing-state";
 
 export type VolunteerCourseStage = "SWIM" | "T1" | "BIKE" | "T2" | "RUN";
 export type VolunteerCutoffStatus = "SAFE" | "WATCH" | "DANGER" | "OUT OF CUTOFF" | "DNF" | "NO CUTOFF";
@@ -63,16 +64,20 @@ function splitTime(participant: LiveParticipant): string | null {
 }
 
 function completedSplitIds(participant: LiveParticipant): Set<string> {
-  return new Set(participant.splits.flatMap((split) => [split.splitId, split.name].map((value) => value.trim().toLowerCase()).filter(Boolean)));
+  return new Set(participant.splits.filter((split) => !["PENDING", "MISSING", "INVALID", "REJECTED"].includes(String(split.status || "").toUpperCase())).flatMap((split) => [split.splitId, split.name].map((value) => value.trim().toLowerCase()).filter(Boolean)));
+}
+
+function nextConfiguredSplit(participant: LiveParticipant, hub: LiveTrackingHubConfig) {
+  const completed = completedSplitIds(participant);
+  const ordered = hub.splits.toSorted((left, right) => left.order - right.order);
+  const lastAcceptedOrder = Math.max(-Infinity, ...ordered.filter((split) => completed.has(split.id.toLowerCase()) || completed.has(split.name.toLowerCase())).map((split) => split.order));
+  return ordered.find((split) => split.order > lastAcceptedOrder);
 }
 
 function cutoffFor(participant: LiveParticipant, hub: LiveTrackingHubConfig, nowMs: number, finished: boolean, status: string) {
   if (status === "DNF") return { label: "DNF", deadline: null, remainingSeconds: null, status: "DNF" as const };
   if (finished) return { label: "Finished", deadline: null, remainingSeconds: null, status: "NO CUTOFF" as const };
-  const completed = completedSplitIds(participant);
-  const nextSplit = hub.splits.toSorted((left, right) => left.order - right.order).find((split) =>
-    !completed.has(split.id.toLowerCase()) && !completed.has(split.name.toLowerCase()),
-  );
+  const nextSplit = nextConfiguredSplit(participant, hub);
   const currentStage = stageOf(participant.currentLeg) || stageOf(participant.raceStatus);
   const currentLeg = hub.legs.find((leg) => stageOf(leg.type) === currentStage);
   const seconds = nextSplit?.cutoffSeconds ?? currentLeg?.cutoffSeconds ?? hub.start.overallCutoffSeconds;
@@ -97,8 +102,7 @@ function timingAthlete(participant: LiveParticipant, hub: LiveTrackingHubConfig,
       || split.cumulativeTime,
     ))
     || (!TERMINAL_NON_FINISH.has(status) && status !== "NOT_STARTED" && status !== "UNKNOWN");
-  const completed = completedSplitIds(participant);
-  const next = hub.splits.toSorted((left, right) => left.order - right.order).find((split) => !completed.has(split.id.toLowerCase()) && !completed.has(split.name.toLowerCase()));
+  const next = nextConfiguredSplit(participant, hub);
   const last = participant.splits.at(-1);
   return {
     id: participant.participantUid,
@@ -106,7 +110,7 @@ function timingAthlete(participant: LiveParticipant, hub: LiveTrackingHubConfig,
     name: participant.fullName || participant.displayName || "Athlete",
     category: participant.contestName || "—",
     status,
-    currentLeg: String(participant.currentLeg || stageOf(participant.raceStatus) || "—"),
+    currentLeg: finished ? "FINISHED" : String(participant.currentLeg || stageOf(participant.raceStatus) || "—"),
     currentSplit: last?.name || participant.latestTimingPoint || "—",
     nextSplit: finished ? "Finished" : next?.name || "—",
     lastTimingAt: splitTime(participant),
@@ -123,7 +127,10 @@ export function buildVolunteerLiveTimingPayload(participants: LiveParticipant[],
   const inferredStages = participants.flatMap((participant) => [stageOf(participant.currentLeg), stageOf(participant.raceStatus), ...participant.splits.map((split) => stageOf(split.name))]).filter((stage): stage is VolunteerCourseStage => Boolean(stage));
   const stageSet = new Set(configuredStages.length ? configuredStages : inferredStages);
   const courseStages = (["SWIM", "T1", "BIKE", "T2", "RUN"] as const).filter((stage) => stageSet.has(stage));
-  const athletes = participants.map((participant) => timingAthlete(participant, hub, now.getTime()));
+  const athletes = participants.map((participant) => {
+    const { participant: resolved, config: scopedHub } = resolveVolunteerTimingState(participant, hub);
+    return timingAthlete(resolved, scopedHub, now.getTime());
+  });
   const legCounts: Record<VolunteerCourseStage, number> = { SWIM: 0, T1: 0, BIKE: 0, T2: 0, RUN: 0 };
   athletes.forEach((athlete) => {
     if (!athlete.started || athlete.finished || TERMINAL_NON_FINISH.has(athlete.status)) return;

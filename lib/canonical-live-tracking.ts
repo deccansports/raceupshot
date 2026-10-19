@@ -19,8 +19,9 @@ import {
 } from "@/packages/timing-core/src";
 import { withTransientKvRetry } from "./kv-retry";
 import { publishCanonicalChange } from "./canonical-change";
-import { decorateLiveParticipantRanks, rankLiveLeaderboardParticipants } from "./live-leaderboard";
+import { decorateLiveParticipantRanks, decorateLiveSplitRanks, rankLiveLeaderboardParticipants } from "./live-leaderboard";
 import { scheduleAutomaticResultNotifications } from './automatic-result-notifications';
+import { publishCanonicalFinisherResults } from './canonical-finisher-publication';
 
 const PREFIX = "raceupshot:canonical";
 type JsonRecord = Record<string, unknown>;
@@ -325,6 +326,9 @@ export function mergeCanonicalParticipantState(...states: Array<LiveParticipant 
   const available = states.filter((state): state is LiveParticipant => Boolean(state));
   if (!available.length) throw new Error("A canonical participant merge requires at least one state.");
   const base = available[0];
+  const corrected = available.filter((state) => state.timingCorrectionAt)
+    .sort((a, b) => a.timingCorrectionAt!.localeCompare(b.timingCorrectionAt!)).at(-1);
+  if (corrected) return { ...base, ...corrected, participantUid: base.participantUid };
   const splitOrder: string[] = [];
   const splits = new Map<string, LiveParticipant["splits"][number]>();
   for (const state of available) {
@@ -378,6 +382,48 @@ export function mergeCanonicalParticipantState(...states: Array<LiveParticipant 
   };
 }
 
+/**
+ * A timing audit is the current canonical result, not another additive source.
+ * Preserve profile/presentation fields from the merged participant while
+ * replacing lifecycle and split evidence exactly. This lets a later Feibot
+ * correction retract an accidentally accepted finish.
+ */
+export function applyAuthoritativeTimingProjection(
+  merged: LiveParticipant,
+  authoritative: LiveParticipant | null | undefined,
+  freshProvider?: LiveParticipant | null,
+): LiveParticipant {
+  if (!authoritative) return merged;
+  const terminal = ["FINISHED", "DNF", "DNS", "DNQ", "DSQ", "OTL"].includes(
+    authoritative.raceStatus,
+  );
+  return {
+    ...merged,
+    raceStatus: authoritative.raceStatus,
+    statusReason: authoritative.statusReason ?? null,
+    cutoffDeadline: authoritative.cutoffDeadline ?? null,
+    cutoffReconcileAt: authoritative.cutoffReconcileAt ?? null,
+    currentLeg: terminal
+      ? undefined
+      : authoritative.currentLeg ?? freshProvider?.currentLeg,
+    latestTimingPoint: authoritative.latestTimingPoint,
+    latestSplitTime: authoritative.latestSplitTime,
+    cumulativeTime: authoritative.cumulativeTime,
+    elapsedTime: authoritative.elapsedTime,
+    overallRank: authoritative.overallRank,
+    genderRank: authoritative.genderRank,
+    ageGroupRank: authoritative.ageGroupRank,
+    estimatedFinishAt: authoritative.estimatedFinishAt,
+    pace: authoritative.pace,
+    progressPercent: authoritative.progressPercent,
+    splits: authoritative.splits.map((split) => ({ ...split })),
+    timingSource: authoritative.timingSource,
+    timingCorrectionAt: authoritative.timingCorrectionAt,
+    lastUpdatedAt:
+      authoritative.lastUpdatedAt ?? freshProvider?.lastUpdatedAt ?? merged.lastUpdatedAt,
+  };
+}
+
 function normalizeStoredCanonicalParticipant(participant: LiveParticipant, eventId: string, fallbackUpdatedAt?: string): LiveParticipant {
   const canonicalSplits = (participant.splits ?? []).filter((split) => Boolean(split?.splitId && split?.name));
   const calculated = normalizeFeibotCalculatedResultParticipant(
@@ -402,6 +448,13 @@ function participantFromTimingAudit(base: LiveParticipant, audit: AthleteTimingA
   const cutoffStopped = ["DNF", "CUTOFF_PENDING"].includes(audit.state) && audit.statusSource === "AUTO_CUTOFF_RULE";
   return {
     ...base,
+    timingCorrectionAt: audit.manualOverrides?.map((override) => override.appliedAt).sort().at(-1),
+    overallRank: undefined,
+    genderRank: undefined,
+    ageGroupRank: undefined,
+    distanceCompletedKm: undefined,
+    progressPercent: undefined,
+    currentLeg: undefined,
     participantUid: audit.participantUuid,
     bib: audit.bib || base.bib,
     raceStatus: cutoffStopped ? audit.state as "DNF" | "CUTOFF_PENDING" : finished ? "FINISHED" : "STARTED",
@@ -562,7 +615,16 @@ export async function buildAndPublishCanonicalEventVersion(input: {
       `Canonical participant normalization rejected all ${input.rows.length} provider rows; the active canonical version was preserved.`,
     );
   }
-  const participants = rankCanonicalFinishers(decorateLiveParticipantRanks(normalizedParticipants));
+  const kv = await getKv();
+  const provisionalIndex = buildCanonicalParticipantIndexRows(input.rows, normalizedParticipants, input.eventId, input.providerEventUuid);
+  const correctedParticipants = await Promise.all(normalizedParticipants.map(async participant => {
+    const row = provisionalIndex.find(row => row.sourceParticipantUid === participant.participantUid || row.participantUuid === participant.participantUid);
+    const contest = row?.providerContestUuid || row?.contestUuid || participant.contestId;
+    if (!contest) return participant;
+    const audit = await kv.get<AthleteTimingAudit>(timingAuditKey(input.providerEventUuid, contest, row?.participantUuid || participant.participantUid), 'json');
+    return audit?.manualOverrides?.length ? participantFromTimingAudit(participant, audit) ?? participant : participant;
+  }));
+  const participants = rankCanonicalFinishers(decorateLiveParticipantRanks(decorateLiveSplitRanks(correctedParticipants)));
   const leaderboard = rankLiveLeaderboardParticipants(participants);
   const builtAt = new Date().toISOString();
   const version = `${builtAt.replaceAll(":", "")}-${crypto.randomUUID().slice(0, 6)}`;
@@ -588,7 +650,6 @@ export async function buildAndPublishCanonicalEventVersion(input: {
     publishedAt: builtAt,
     updatedAt: builtAt,
   };
-  const kv = await getKv();
   const prefix = versionPrefix(input.eventId, version);
   const expectedFiles = [manifestKey(input.eventId), `${prefix}:build:status`, `${prefix}:build:validation`, `${prefix}:course`, `${prefix}:participant:index`];
   const building: CanonicalBuildStatus = { schemaVersion: 1, eventId: input.eventId, buildVersion: version, status: "building", startedAt: builtAt, completedAt: null, participantCount: participants.length, message: "Canonical build is writing version-pinned artifacts." };
@@ -641,7 +702,11 @@ export async function buildAndPublishCanonicalEventVersion(input: {
     canonicalWriteCompletedAt: manifestPersistedAt,
     manifestPersistedAt,
   });
-  if (participants.some(participant => participant.raceStatus === 'FINISHED')) await scheduleAutomaticResultNotifications(input.eventId);
+  const publishedFinishers = await publishCanonicalFinisherResults(input.eventId, participants).catch((error) => {
+    console.error(JSON.stringify({ type: 'canonical_finisher_publication_failed', eventId: input.eventId, error: error instanceof Error ? error.message : String(error) }));
+    return 0;
+  });
+  if (publishedFinishers > 0) await scheduleAutomaticResultNotifications(input.eventId);
   return manifest;
 }
 
@@ -708,7 +773,7 @@ export async function publishIncrementalCanonicalParticipants(input: {
     merged.get(participant.participantUid),
     targeted[indexPosition]?.baseVersion === version ? targeted[indexPosition]?.participant : null,
   ));
-  const currentParticipants = participants.map((participant, indexPosition) => mergeCanonicalParticipantState(
+  const currentParticipants = participants.map((participant, indexPosition) => applyAuthoritativeTimingProjection(mergeCanonicalParticipantState(
     timingParticipants[indexPosition]
       && timingParticipants[indexPosition]?.raceStatus !== "FINISHED"
       && previousParticipants[indexPosition].raceStatus === "FINISHED"
@@ -724,8 +789,9 @@ export async function publishIncrementalCanonicalParticipants(input: {
         ? { ...participant, raceStatus: "STARTED" }
         : participant,
     timingParticipants[indexPosition],
-  ));
+  ), timingParticipants[indexPosition], participant));
   const timingFingerprint = (participant: LiveParticipant) => JSON.stringify({
+    timingCorrectionAt: participant.timingCorrectionAt,
     raceStatus: participant.raceStatus,
     currentLeg: participant.currentLeg,
     latestTimingPoint: participant.latestTimingPoint,
@@ -752,13 +818,23 @@ export async function publishIncrementalCanonicalParticipants(input: {
   const changedParticipants = currentParticipants.filter((participant, indexPosition) =>
     timingFingerprint(participant) !== timingFingerprint(previousParticipants[indexPosition]),
   );
-  if (!changedParticipants.length) return false;
   for (const participant of changedParticipants) merged.set(participant.participantUid, participant);
   const canonicalProjection = new Map(baseByUid);
   for (const participant of merged.values()) canonicalProjection.set(participant.participantUid, participant);
-  const rankedFinishers = rankCanonicalFinishers(decorateLiveParticipantRanks([...canonicalProjection.values()]));
+  const rankedFinishers = rankCanonicalFinishers(decorateLiveParticipantRanks(decorateLiveSplitRanks([...canonicalProjection.values()])));
   const rankedByUid = new Map(rankedFinishers.map((participant) => [participant.participantUid, participant]));
-  const publishedParticipants = changedParticipants.map((participant) => rankedByUid.get(participant.participantUid) ?? participant);
+  const changedIds = new Set(changedParticipants.map(participant => participant.participantUid));
+  const publishedParticipants = rankedFinishers.filter(participant => {
+    const previous = canonicalProjection.get(participant.participantUid);
+    return changedIds.has(participant.participantUid) || previous?.overallRank !== participant.overallRank
+      || previous?.genderRank !== participant.genderRank || previous?.ageGroupRank !== participant.ageGroupRank
+      || JSON.stringify(previous?.splits.map(split => [split.splitId, split.rankAtSplit]))
+        !== JSON.stringify(participant.splits.map(split => [split.splitId, split.rankAtSplit]));
+  });
+  if (!publishedParticipants.length) return false;
+  // Retain rank-only updates in the event overlay as well as targeted records.
+  // The next publication must compare against the last published ranks.
+  for (const participant of publishedParticipants) merged.set(participant.participantUid, participant);
   const updatedAt = new Date().toISOString();
   await Promise.all([
     ...publishedParticipants.map((participant) => kv.put(incrementalParticipantKey(input.eventId, participant.participantUid), JSON.stringify({
@@ -826,7 +902,12 @@ export async function publishIncrementalCanonicalParticipants(input: {
     manifestPersistedAt,
     feibotReadAcceptedAt: input.feibotReadAcceptedAt,
   });
-  if (changedParticipants.some(participant => participant.raceStatus === 'FINISHED')) await scheduleAutomaticResultNotifications(input.eventId);
+  const changedParticipantIds = new Set(changedParticipants.map((participant) => participant.participantUid));
+  const publishedFinishers = await publishCanonicalFinisherResults(input.eventId, rankedFinishers.filter((participant) => changedParticipantIds.has(participant.participantUid))).catch((error) => {
+    console.error(JSON.stringify({ type: 'canonical_finisher_publication_failed', eventId: input.eventId, error: error instanceof Error ? error.message : String(error) }));
+    return 0;
+  });
+  if (publishedFinishers > 0) await scheduleAutomaticResultNotifications(input.eventId);
   return true;
 }
 

@@ -1,9 +1,12 @@
+import { BIB_PRINT_FONT_CSS, MONTSERRAT_EXTRABOLD } from './bib-print-fonts';
+
 export type PrintPaperPreset = "A5" | "A4_SINGLE_A5" | "A4" | "12X18" | "12X8" | "STICKER_4X2";
 export type PrintTemplateType = "BIB" | "STICKER";
 export type PrintGenderScope = "ALL" | "MALE" | "FEMALE";
 export const PRINT_FONT_FAMILIES = [
   "Arial, sans-serif",
   "Poppins, sans-serif",
+  MONTSERRAT_EXTRABOLD,
   "\"Monument Extended\", \"Arial Black\", sans-serif",
   "\"PF Monumenta Pro\", Georgia, serif",
   "Georgia, serif",
@@ -12,11 +15,37 @@ export const PRINT_FONT_FAMILIES = [
 ] as const;
 export type PrintElementKind =
   | "BIB_NUMBER" | "PARTICIPANT_NAME" | "FIRST_NAME" | "LAST_NAME"
-  | "RACE_CATEGORY" | "SUBCATEGORY" | "GENDER" | "AGE_GROUP" | "GENDER_AGE_GROUP"
-  | "CLUB_NAME" | "COUNTRY_FLAG" | "TSHIRT_SIZE" | "EMERGENCY_CONTACT"
+  | "PARTICIPANT_ID" | "REGISTRATION_ID" | "EMAIL_ADDRESS" | "MOBILE_NUMBER"
+  | "PARTICIPATION_MODE" | "RELAY_TEAM_NAME" | "RELAY_TEAM_SIZE" | "RELAY_MEMBER_NUMBER" | "RELAY_MEMBER_ROLE"
+  | "RACE_CATEGORY" | "SUBCATEGORY" | "SESSION_ID" | "SESSION_NAME" | "SCHEDULED_START"
+  | "GENDER" | "DATE_OF_BIRTH" | "AGE" | "AGE_GROUP" | "GENDER_AGE_GROUP" | "BLOOD_GROUP"
+  | "CLUB_NAME" | "COUNTRY_FLAG" | "TSHIRT_SIZE" | "EMERGENCY_CONTACT_NAME" | "EMERGENCY_CONTACT"
+  | "ADDRESS" | "CITY" | "STATE" | "COUNTRY" | "PINCODE"
+  | "BOOKING_ID" | "REGISTRATION_STATUS" | "TICKET_STATUS" | "BEL_SEASON" | "BEL_RECOGNITION"
+  | "TICKET_PRICE" | "AMOUNT_PAID" | "BALANCE_AMOUNT" | "TAX_AMOUNT" | "PROCESSING_FEE" | "TRANSACTION_ID"
+  | "REGISTERED_AT" | "ACTUAL_RACE_DATE" | "UPDATED_AT"
+  | "WAIVER_STATUS" | "WAIVER_CHECKED_IN_AT" | "WAIVER_VOLUNTEER" | "WAIVER_COUNTER"
+  | "HANDOVER_TO_NAME" | "HANDOVER_TO_MOBILE" | "BIKE_CHECK_IN" | "BIKE_CHECK_IN_REMARKS"
+  | "HELMET_CHECKED" | "BIKE_CHECK_OUT" | "LOCKER_NUMBER" | "MEDAL_ISSUED" | "FINISHER_JERSEY_ISSUED" | "FOOD_ISSUED"
+  | "IDENTITY_PROOF" | "DEFERRED" | "DEFERRED_FROM_PUNE" | "CANCELLATION_REASON"
   | "TIMING_CHIP" | "ATHLETE_BAND_CODE" | "PARTICIPANT_QR" | "ATHLETE_BAND_QR"
   | "BARCODE" | "STATIC_TEXT" | "STATIC_IMAGE"
   | "RECTANGLE" | "ELLIPSE" | "LINE";
+
+export const PRINT_DATA_ELEMENT_KINDS: ReadonlyArray<PrintElementKind> = [
+  "BIB_NUMBER", "PARTICIPANT_NAME", "FIRST_NAME", "LAST_NAME", "PARTICIPANT_ID", "REGISTRATION_ID",
+  "EMAIL_ADDRESS", "MOBILE_NUMBER", "PARTICIPATION_MODE", "RELAY_TEAM_NAME", "RELAY_TEAM_SIZE",
+  "RELAY_MEMBER_NUMBER", "RELAY_MEMBER_ROLE", "RACE_CATEGORY", "SUBCATEGORY", "SESSION_ID", "SESSION_NAME",
+  "SCHEDULED_START", "GENDER", "DATE_OF_BIRTH", "AGE", "AGE_GROUP", "GENDER_AGE_GROUP", "BLOOD_GROUP",
+  "CLUB_NAME", "COUNTRY_FLAG", "TSHIRT_SIZE", "EMERGENCY_CONTACT_NAME", "EMERGENCY_CONTACT", "ADDRESS", "CITY",
+  "STATE", "COUNTRY", "PINCODE", "BOOKING_ID", "REGISTRATION_STATUS", "TICKET_STATUS", "BEL_SEASON",
+  "BEL_RECOGNITION", "TICKET_PRICE", "AMOUNT_PAID", "BALANCE_AMOUNT", "TAX_AMOUNT", "PROCESSING_FEE",
+  "TRANSACTION_ID", "REGISTERED_AT", "ACTUAL_RACE_DATE", "UPDATED_AT", "WAIVER_STATUS", "WAIVER_CHECKED_IN_AT",
+  "WAIVER_VOLUNTEER", "WAIVER_COUNTER", "HANDOVER_TO_NAME", "HANDOVER_TO_MOBILE", "BIKE_CHECK_IN",
+  "BIKE_CHECK_IN_REMARKS", "HELMET_CHECKED", "BIKE_CHECK_OUT", "LOCKER_NUMBER", "MEDAL_ISSUED",
+  "FINISHER_JERSEY_ISSUED", "FOOD_ISSUED", "IDENTITY_PROOF", "DEFERRED", "DEFERRED_FROM_PUNE",
+  "CANCELLATION_REASON", "TIMING_CHIP", "ATHLETE_BAND_CODE", "PARTICIPANT_QR", "ATHLETE_BAND_QR", "BARCODE",
+];
 
 export interface PrintTemplateElement {
   id: string;
@@ -68,6 +97,18 @@ export interface PrintParticipant {
   athleteBandCode: string;
   registrationStatus: string;
   active: boolean;
+  registrationId?: string; email?: string; mobile?: string;
+  participationMode?: string; relayTeamName?: string; relayTeamSize?: string; relayMemberNumber?: string; relayMemberRole?: string;
+  subcategoryName?: string; sessionId?: string; sessionName?: string; scheduledStart?: string;
+  dateOfBirth?: string; age?: string; bloodGroup?: string; emergencyContactName?: string;
+  address?: string; city?: string; state?: string; pincode?: string;
+  ticketStatus?: string; belSeason?: string; belRecognition?: string;
+  ticketPrice?: string; amountPaid?: string; balanceAmount?: string; taxAmount?: string; processingFee?: string; transactionId?: string;
+  registeredAt?: string; actualRaceDate?: string; updatedAt?: string;
+  waiverStatus?: string; waiverCheckedInAt?: string; waiverVolunteer?: string; waiverCounter?: string;
+  handoverToName?: string; handoverToMobile?: string; bikeCheckIn?: string; bikeCheckInRemarks?: string;
+  helmetChecked?: string; bikeCheckOut?: string; lockerNumber?: string; medalIssued?: string; finisherJerseyIssued?: string; foodIssued?: string;
+  identityProof?: string; deferred?: string; deferredFromPune?: string; cancellationReason?: string;
 }
 
 export interface PrintTemplateLayout {
@@ -217,11 +258,31 @@ export function printElementText(element: PrintTemplateElement, participant: Pri
   const values: Partial<Record<PrintElementKind, string>> = {
     BIB_NUMBER: participant.bibNumber, PARTICIPANT_NAME: participant.name,
     FIRST_NAME: names[0] ?? "", LAST_NAME: names.slice(1).join(" "),
-    RACE_CATEGORY: participant.ticketName || participant.ticketId, SUBCATEGORY: participant.subcategoryId ?? "",
-    GENDER: participant.gender, AGE_GROUP: participant.ageGroup,
+    PARTICIPANT_ID: participant.participantId, REGISTRATION_ID: participant.registrationId ?? "",
+    EMAIL_ADDRESS: participant.email ?? "", MOBILE_NUMBER: participant.mobile ?? "",
+    PARTICIPATION_MODE: participant.participationMode ?? "", RELAY_TEAM_NAME: participant.relayTeamName ?? "",
+    RELAY_TEAM_SIZE: participant.relayTeamSize ?? "", RELAY_MEMBER_NUMBER: participant.relayMemberNumber ?? "",
+    RELAY_MEMBER_ROLE: participant.relayMemberRole ?? "",
+    RACE_CATEGORY: participant.ticketName || participant.ticketId, SUBCATEGORY: participant.subcategoryName || participant.subcategoryId || "",
+    SESSION_ID: participant.sessionId ?? "", SESSION_NAME: participant.sessionName ?? "", SCHEDULED_START: participant.scheduledStart ?? "",
+    GENDER: participant.gender, DATE_OF_BIRTH: participant.dateOfBirth ?? "", AGE: participant.age ?? "", AGE_GROUP: participant.ageGroup,
     GENDER_AGE_GROUP: [participant.gender, participant.ageGroup].filter(Boolean).join(" · "),
-    CLUB_NAME: participant.club, COUNTRY_FLAG: countryFlag,
-    TSHIRT_SIZE: participant.tshirtSize, EMERGENCY_CONTACT: participant.emergencyContact,
+    BLOOD_GROUP: participant.bloodGroup ?? "", CLUB_NAME: participant.club, COUNTRY_FLAG: countryFlag,
+    TSHIRT_SIZE: participant.tshirtSize, EMERGENCY_CONTACT_NAME: participant.emergencyContactName ?? "", EMERGENCY_CONTACT: participant.emergencyContact,
+    ADDRESS: participant.address ?? "", CITY: participant.city ?? "", STATE: participant.state ?? "", COUNTRY: participant.country,
+    PINCODE: participant.pincode ?? "", BOOKING_ID: participant.bookingId ?? "", REGISTRATION_STATUS: participant.registrationStatus,
+    TICKET_STATUS: participant.ticketStatus ?? "", BEL_SEASON: participant.belSeason ?? "", BEL_RECOGNITION: participant.belRecognition ?? "",
+    TICKET_PRICE: participant.ticketPrice ?? "", AMOUNT_PAID: participant.amountPaid ?? "", BALANCE_AMOUNT: participant.balanceAmount ?? "",
+    TAX_AMOUNT: participant.taxAmount ?? "", PROCESSING_FEE: participant.processingFee ?? "", TRANSACTION_ID: participant.transactionId ?? "",
+    REGISTERED_AT: participant.registeredAt ?? "", ACTUAL_RACE_DATE: participant.actualRaceDate ?? "", UPDATED_AT: participant.updatedAt ?? "",
+    WAIVER_STATUS: participant.waiverStatus ?? "", WAIVER_CHECKED_IN_AT: participant.waiverCheckedInAt ?? "",
+    WAIVER_VOLUNTEER: participant.waiverVolunteer ?? "", WAIVER_COUNTER: participant.waiverCounter ?? "",
+    HANDOVER_TO_NAME: participant.handoverToName ?? "", HANDOVER_TO_MOBILE: participant.handoverToMobile ?? "",
+    BIKE_CHECK_IN: participant.bikeCheckIn ?? "", BIKE_CHECK_IN_REMARKS: participant.bikeCheckInRemarks ?? "",
+    HELMET_CHECKED: participant.helmetChecked ?? "", BIKE_CHECK_OUT: participant.bikeCheckOut ?? "", LOCKER_NUMBER: participant.lockerNumber ?? "",
+    MEDAL_ISSUED: participant.medalIssued ?? "", FINISHER_JERSEY_ISSUED: participant.finisherJerseyIssued ?? "", FOOD_ISSUED: participant.foodIssued ?? "",
+    IDENTITY_PROOF: participant.identityProof ?? "", DEFERRED: participant.deferred ?? "", DEFERRED_FROM_PUNE: participant.deferredFromPune ?? "",
+    CANCELLATION_REASON: participant.cancellationReason ?? "",
     TIMING_CHIP: participant.chipCode, ATHLETE_BAND_CODE: participant.athleteBandCode,
     PARTICIPANT_QR: participant.participantId, ATHLETE_BAND_QR: participant.athleteBandCode,
     BARCODE: participant.bibNumber, STATIC_TEXT: element.text ?? "",
@@ -279,6 +340,7 @@ export function renderPrintHtml(input: { template: PrintTemplate; participants: 
   const rotateSingleBib = layout.paperPreset === "A5" || layout.paperPreset === "A4_SINGLE_A5";
   return `<!doctype html><html><head><meta charset="utf-8" /><style>
     @import url("https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap");
+    ${BIB_PRINT_FONT_CSS}
     @page { size: ${layout.pageWidthMm}mm ${layout.pageHeightMm}mm; margin: 0; }
     * { box-sizing: border-box; } html,body { width:${layout.pageWidthMm}mm; margin:0; padding:0; background:white; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
     .print-page { position:relative; width:${layout.pageWidthMm}mm; height:${layout.pageHeightMm}mm; padding:${layout.marginTopMm}mm ${layout.marginRightMm}mm ${layout.marginBottomMm}mm ${layout.marginLeftMm}mm; gap:${layout.gapMm}mm; background:white; overflow:hidden; break-after:page; page-break-after:always; display:grid; grid-template-columns:repeat(${layout.columns}, ${layout.itemWidthMm}mm); grid-template-rows:repeat(${layout.rows}, ${layout.itemHeightMm}mm); }

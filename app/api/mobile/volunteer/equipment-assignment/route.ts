@@ -9,6 +9,7 @@ const inputSchema = z.object({
   participantId: z.string().trim().min(1).max(250),
   kind: z.enum(["chip", "athlete-band"]),
   code: z.string().trim().min(2).max(64),
+  assignmentMethod: z.enum(["RFID_READER", "QR", "MANUAL", "LEGACY"]).optional().default("MANUAL"),
 });
 
 export const dynamic = "force-dynamic";

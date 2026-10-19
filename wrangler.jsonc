@@ -18,12 +18,14 @@
   "durable_objects": {
     "bindings": [
       { "name": "CANONICAL_CHANGE_HUB", "class_name": "CanonicalChangeHub" },
-      { "name": "VOLUNTEER_OPERATIONS", "class_name": "VolunteerOperationCoordinator" }
+      { "name": "VOLUNTEER_OPERATIONS", "class_name": "VolunteerOperationCoordinator" },
+      { "name": "RFID_WRITE_COORDINATOR", "class_name": "RfidWriteCoordinator" }
     ]
   },
   "migrations": [
     { "tag": "v1-canonical-change-hub", "new_sqlite_classes": ["CanonicalChangeHub"] },
-    { "tag": "v2-volunteer-operation-coordinator", "new_sqlite_classes": ["VolunteerOperationCoordinator"] }
+    { "tag": "v2-volunteer-operation-coordinator", "new_sqlite_classes": ["VolunteerOperationCoordinator"] },
+    { "tag": "v3-rfid-write-coordinator", "new_sqlite_classes": ["RfidWriteCoordinator"] }
   ],
   "vars": {
     "APP_ENV": "production",

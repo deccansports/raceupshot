@@ -2,6 +2,7 @@ import { getCloudflareContext } from "@opennextjs/cloudflare";
 import type { KVNamespace } from "@cloudflare/workers-types";
 import { sendBergtecnoEmail } from "./bergtecno-email";
 import { BERGTECNO_TEMPLATES } from "./email-templates";
+import { normalizeAiSensyPhone, sendAiSensyOtpWhatsApp } from "./aisensy-whatsapp";
 import { getVolunteerByEmail, getVolunteerById, markVolunteerActive, type VolunteerProfile } from "./volunteer-management";
 import { verifyVolunteerPasswordCredential, volunteerPasswordKey, type VolunteerPasswordCredential } from "./volunteer-password";
 
@@ -93,6 +94,11 @@ async function otpKey(email: string): Promise<string> {
   return `${OTP_PREFIX}${await digest(email.trim().toLowerCase())}`;
 }
 
+function maskedMobile(value: string): string {
+  const normalized = normalizeAiSensyPhone(value).replace(/^\+/, "");
+  return normalized ? `${"*".repeat(Math.max(0, normalized.length - 4))}${normalized.slice(-4)}` : "";
+}
+
 export async function requestVolunteerOtp(emailInput: string) {
   const email = emailInput.trim().toLowerCase();
   const volunteer = await getVolunteerByEmail(email);
@@ -116,16 +122,27 @@ export async function requestVolunteerOtp(emailInput: string) {
     attempts: 0,
   };
   await store.put(key, JSON.stringify(record), { expirationTtl: OTP_SECONDS + 60 });
-  const delivery = await sendBergtecnoEmail({
-    recipientEmail: email,
-    templateId: BERGTECNO_TEMPLATES.loginOtp.uuid,
-    variables: { otp, year: new Date().getFullYear() },
-  });
-  if (!delivery.sent) {
+  const [whatsapp, emailDelivery] = await Promise.all([
+    sendAiSensyOtpWhatsApp({
+      recipientPhone: volunteer.mobile,
+      recipientName: volunteer.name,
+      otp,
+    }),
+    sendBergtecnoEmail({
+      recipientEmail: email,
+      templateId: BERGTECNO_TEMPLATES.loginOtp.uuid,
+      variables: { otp, year: new Date().getFullYear() },
+    }),
+  ]);
+  if (!whatsapp.accepted && !emailDelivery.sent) {
     await store.delete(key);
-    throw new Error(delivery.error || "The volunteer OTP email could not be sent.");
+    throw new Error(whatsapp.error || emailDelivery.error || "The volunteer OTP could not be sent.");
   }
-  return { requested: true, message: "Your six-digit volunteer OTP has been sent. It is valid for 5 minutes." };
+  const channels = [emailDelivery.sent ? "email" : "", whatsapp.accepted ? `WhatsApp to ${maskedMobile(volunteer.mobile)}` : ""].filter(Boolean).join(" and ");
+  return {
+    requested: true,
+    message: `Your six-digit volunteer OTP was sent by ${channels}. Use the WhatsApp copy-code button or enter it manually. It is valid for 5 minutes.`,
+  };
 }
 
 async function createVolunteerSession(volunteer: VolunteerProfile): Promise<string> {

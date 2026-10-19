@@ -2,6 +2,9 @@
 /* eslint-disable @next/next/no-img-element */
 
 import type { FinishLineLedConfig, FinishLineLedFeed, FinishLineLedLogo } from "@/lib/finish-line-led";
+import { LED_FIELD_IDS, LED_FIELD_LABELS, ledGridColumns, normalizeLedFields, moveLedField, type LedField } from "@/lib/finish-line-led-fields";
+import { latestVisibleFinishers, LedFinisherField } from "./finish-line-led-display";
+import { resolveLedLogos } from "@/lib/finish-line-led-logos";
 import { Copy, ExternalLink, ImagePlus, RefreshCw, Save, Tv, UploadCloud } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -23,11 +26,16 @@ export function FinishLineLedAdmin({ events }: { events: LedEvent[] }) {
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [message, setMessage] = useState("");
+  const [draggedField, setDraggedField] = useState<LedField | null>(null);
+  const selectedFields = normalizeLedFields(config.visibleFields);
+  function moveField(field: LedField, target: LedField) {
+    setConfig((current) => ({ ...current, visibleFields: moveLedField(normalizeLedFields(current.visibleFields), field, target) }));
+  }
   const displayUrl = eventId ? `/finish-line-led/${encodeURIComponent(eventId)}` : "";
 
   const allLogos = useMemo(() => {
     const merged = new Map<string, FinishLineLedLogo>();
-    [...availableLogos, ...config.logos].forEach((logo) => merged.set(logo.id, logo));
+    [...config.logos, ...availableLogos].forEach((logo) => merged.set(logo.id, logo));
     return [...merged.values()];
   }, [availableLogos, config.logos]);
 
@@ -58,7 +66,7 @@ export function FinishLineLedAdmin({ events }: { events: LedEvent[] }) {
   }, [refresh]);
 
   function toggleLogo(logo: FinishLineLedLogo) {
-    setConfig((current) => ({ ...current, logos: current.logos.some((item) => item.id === logo.id) ? current.logos.filter((item) => item.id !== logo.id) : [...current.logos, logo] }));
+    setConfig((current) => ({ ...current, syncEventLogos: availableLogos.some((item) => item.id === logo.id) ? false : current.syncEventLogos, logos: current.logos.some((item) => item.id === logo.id) ? current.logos.filter((item) => item.id !== logo.id) : [...current.logos, logo] }));
   }
 
   function addCustomLogo(name = customName, logoUrl = customUrl) {
@@ -121,10 +129,15 @@ export function FinishLineLedAdmin({ events }: { events: LedEvent[] }) {
 
       <div className="finish-led-settings-grid">
         <div className="finish-led-logo-picker">
-          <div className="finish-led-settings-head"><div><h3>LED logos</h3><p>Event logo comes from Event settings. Sponsor logos come from Partners, or add one here.</p></div><span>{config.logos.length} selected</span></div>
+          <div className="finish-led-settings-head"><div><h3>LED logos</h3><p>Uses this event’s logo and sponsors from Events &amp; Registration → Sponsors / Partners. No separate upload is needed.</p></div><span>{config.logos.length} selected</span></div>
+          <label className="finish-led-logo-sync"><input type="checkbox" checked={config.syncEventLogos !== false} onChange={(event) => {
+            const enabled = event.target.checked;
+            setConfig((current) => ({ ...current, syncEventLogos: enabled, logos: enabled ? resolveLedLogos(availableLogos, current.logos) : current.logos }));
+          }} />Automatically sync event and registration sponsor logos</label>
+          <p className="finish-led-logo-help">New and updated logos follow the selected event. Selecting individual source logos switches to manual selection. Save LED settings to apply.</p>
           <div className="finish-led-logo-list">
             {allLogos.map((logo) => <label key={logo.id} className={config.logos.some((item) => item.id === logo.id) ? "selected" : ""}><input type="checkbox" checked={config.logos.some((item) => item.id === logo.id)} onChange={() => toggleLogo(logo)} /><img src={logo.logoUrl} alt="" /><span><strong>{logo.name}</strong><small>{logo.kind === "EVENT" ? "Event logo" : "Sponsor logo"}</small></span></label>)}
-            {!allLogos.length && <div className="admin-empty">No event or partner logos are configured yet. Add one below.</div>}
+            {!allLogos.length && <div className="admin-empty">No logos are saved for this event yet. Add sponsors for this same event in <a href="/admin/events-registration?tab=sponsors">Events &amp; Registration → Sponsors</a>, then refresh here. You can also add a custom LED logo below.</div>}
           </div>
           <div className="finish-led-custom-logo">
             <label>Sponsor / logo name<input value={customName} onChange={(event) => setCustomName(event.target.value)} placeholder="Sponsor name" /></label>
@@ -136,13 +149,41 @@ export function FinishLineLedAdmin({ events }: { events: LedEvent[] }) {
         <div className="finish-led-rotation-settings">
           <h3>Rotation timing</h3>
           <label>Logo seconds<input type="number" min="3" max="30" value={config.idleRotationSeconds} onChange={(event) => setConfig((current) => ({ ...current, idleRotationSeconds: Number(event.target.value) }))} /></label>
-          <label>Finisher page seconds<input type="number" min="3" max="30" value={config.finisherRotationSeconds} onChange={(event) => setConfig((current) => ({ ...current, finisherRotationSeconds: Number(event.target.value) }))} /></label>
+          <p>Latest three finishers only. New arrivals roll in at the top; older finishers do not cycle back. Ranks are never displayed.</p>
+          <fieldset className="finish-led-field-picker">
+            <legend>Visible finisher fields</legend>
+            {LED_FIELD_IDS.map((field) => {
+              const selected = normalizeLedFields(config.visibleFields);
+              return <label key={field}><input type="checkbox" checked={selected.includes(field)} disabled={selected.length === 1 && selected.includes(field)} onChange={() => setConfig((current) => {
+                const fields = normalizeLedFields(current.visibleFields);
+                return { ...current, visibleFields: fields.includes(field) ? fields.filter((item) => item !== field) : [...fields, field] };
+              })} />{LED_FIELD_LABELS[field]}</label>;
+            })}
+          </fieldset>
+          <div className="finish-led-field-order">
+            <h3>Column order</h3>
+            <p>Drag a field to reorder it, or use the arrows. Top to bottom becomes left to right on the LED screen. Save to publish this order.</p>
+            <ol aria-label="LED column order">
+              {selectedFields.map((field, index) => <li key={field}
+                className={draggedField === field ? "dragging" : ""}
+                onDragOver={(event) => { if (draggedField) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }}
+                onDrop={(event) => { event.preventDefault(); if (draggedField) moveField(draggedField, field); setDraggedField(null); }}>
+                <span className="finish-led-drag-handle" draggable
+                  title={`Drag ${LED_FIELD_LABELS[field]}`}
+                  onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", field); setDraggedField(field); }}
+                  onDragEnd={() => setDraggedField(null)}>⠿</span>
+                <span>{LED_FIELD_LABELS[field]}</span>
+                <button type="button" aria-label={`Move ${LED_FIELD_LABELS[field]} left`} disabled={index === 0} onClick={() => moveField(field, selectedFields[index - 1])}>↑</button>
+                <button type="button" aria-label={`Move ${LED_FIELD_LABELS[field]} right`} disabled={index === selectedFields.length - 1} onClick={() => moveField(field, selectedFields[index + 1])}>↓</button>
+              </li>)}
+            </ol>
+          </div>
           <button className="button button-primary" type="button" disabled={saving || !eventId} onClick={() => void save()}><Save /> {saving ? "Saving…" : "Save LED settings"}</button>
         </div>
       </div>
 
       <div className="finish-led-admin-preview">
-        {feed?.finishers.length ? feed.finishers.slice(0, 10).map((finisher) => <article key={finisher.id}><span>{finisher.bib || "—"}</span><strong>{finisher.name}</strong><small>{finisher.gender?.slice(0, 1).toUpperCase()}{finisher.ageGroup || "Open"} · {finisher.country}</small><time>{finisher.finishTime}</time></article>) : <div className="admin-empty">Event and sponsor logos rotate full-screen with the elapsed clock until the first official finisher arrives.</div>}
+        {feed?.finishers.length ? latestVisibleFinishers(feed.finishers).map((finisher) => <article key={finisher.id} style={{ gridTemplateColumns: ledGridColumns(normalizeLedFields(config.visibleFields)) }}>{normalizeLedFields(config.visibleFields).map((field) => <LedFinisherField key={field} finisher={finisher} field={field} />)}</article>) : <div className="admin-empty">Event and sponsor logos rotate full-screen with the elapsed clock until the first official finisher arrives.</div>}
       </div>
     </section>
   </>;

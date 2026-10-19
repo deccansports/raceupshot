@@ -6,6 +6,7 @@ import { getEventPlatformSettings } from "./platform-repository";
 import { withTransientKvRetry } from "./kv-retry";
 import { applyParticipantRosterImport, getPrivateImportedParticipantRows, participantRegistrationScope } from "./participant-roster-import";
 import { mapWithConcurrency } from "./map-with-concurrency";
+import { timingChipCodeForDisplay } from "./rfid-reader-assignment";
 import type { Athlete } from "./types";
 
 const PREFIX = "raceupshot";
@@ -20,6 +21,11 @@ export interface ParticipantChipAssignmentAudit {
   participantName: string;
   previousChipCode: string;
   chipCode: string;
+  fullEpc?: string;
+  inventoryChipId?: string;
+  epcProfileId?: string;
+  assignmentMethod?: "RFID_READER" | "QR" | "MANUAL" | "ADMIN";
+  syncStatus?: "ASSIGNED" | "SYNC_PENDING" | "SYNCED" | "CONFLICT";
   reason: string;
   changedBy: string;
   changedAt: string;
@@ -231,13 +237,24 @@ export async function applyParticipantChipAssignments(kv: KVNamespace, eventId: 
     // so clearing the chip from any member also clears an older assignment
     // recorded against another member.
     const assignment = chipAssignmentByRelayTeam.get(relayChipGroupKey(row)) || directAssignment;
+    const displayedChipCode = assignment ? timingChipCodeForDisplay(assignment.chipCode) : "";
+    const legacyReaderEpc = assignment ? isReaderLikeLegacyChip(assignment.chipCode) : false;
+    const displayedAssignment = assignment && (displayedChipCode !== assignment.chipCode || (legacyReaderEpc && !assignment.fullEpc)) ? {
+      ...assignment,
+      chipCode: displayedChipCode,
+      fullEpc: assignment.fullEpc || assignment.chipCode,
+    } : assignment;
     const bandAssignment = identities.map((id) => bandByParticipant.get(id)).find((item): item is ParticipantAthleteBandAssignmentAudit => Boolean(item));
     return {
       ...row,
-      ...(assignment ? { chipCode: assignment.chipCode, chip_code: assignment.chipCode, chipAssignment: assignment } : {}),
+      ...(displayedAssignment ? { chipCode: displayedAssignment.chipCode, chip_code: displayedAssignment.chipCode, chipAssignment: displayedAssignment } : {}),
       ...(bandAssignment ? { athleteBandCode: bandAssignment.athleteBandCode, athlete_band_code: bandAssignment.athleteBandCode, athleteBandAssignment: bandAssignment } : {}),
     };
   });
+}
+
+function isReaderLikeLegacyChip(value: string): boolean {
+  return /^[0-9A-F]{16,}$/.test(value.trim().replace(/\s+/g, "").toUpperCase());
 }
 
 export async function getAdminParticipantRoster(eventIdOrSlug: string, options: { includeUploadedFields?: boolean } = {}): Promise<{
@@ -282,6 +299,10 @@ export async function replaceParticipantChip(input: {
   chipCode: string;
   reason: string;
   changedBy: string;
+  fullEpc?: string;
+  inventoryChipId?: string;
+  epcProfileId?: string;
+  assignmentMethod?: ParticipantChipAssignmentAudit["assignmentMethod"];
 }): Promise<{ assignment: ParticipantChipAssignmentAudit; participant: JsonRecord }> {
   const event = await getEventBySlug(input.eventIdOrSlug, { includeUnpublished: true });
   if (!event) throw new Error("Event not found.");
@@ -312,6 +333,11 @@ export async function replaceParticipantChip(input: {
     participantName: String(selected.fullName ?? selected.name ?? "").trim(),
     previousChipCode,
     chipCode: nextChip,
+    fullEpc: input.fullEpc,
+    inventoryChipId: input.inventoryChipId,
+    epcProfileId: input.epcProfileId,
+    assignmentMethod: input.assignmentMethod || "ADMIN",
+    syncStatus: providerEventUuid ? "SYNC_PENDING" : "ASSIGNED",
     reason: input.reason.trim(),
     changedBy: input.changedBy,
     changedAt,
@@ -358,6 +384,7 @@ export async function removeParticipantChip(input: {
     id: crypto.randomUUID(), eventId: event.id, providerEventUuid, participantId: input.participantId,
     bib: String(selected.bib ?? selected.bibNumber ?? "").trim(), participantName: String(selected.fullName ?? selected.name ?? "").trim(),
     previousChipCode, chipCode: "", reason: input.reason.trim(), changedBy: input.changedBy, changedAt,
+    assignmentMethod: "ADMIN", syncStatus: providerEventUuid ? "SYNC_PENDING" : "ASSIGNED",
   };
   const [assignmentIds, auditIds] = await Promise.all([
     kv.get<string[]>(assignmentIndexKey(event.id), "json").then((value) => value ?? []),

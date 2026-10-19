@@ -212,18 +212,57 @@ function logResponse(
   }
 }
 
-function isApplicationError(payload: unknown): payload is {
-  success: false;
-  message?: string;
-  error?: string;
-  detail?: string;
-} {
-  return Boolean(
-    payload &&
-    typeof payload === "object" &&
-    !Array.isArray(payload) &&
-    (payload as { success?: unknown }).success === false,
-  );
+type ApplicationErrorDetails = {
+  status: number;
+  code: string;
+  message: string;
+  userMessage: string;
+  retryable: boolean;
+};
+
+function errorStatus(code: string, type: string, httpStatus: number): number {
+  const key = `${code}:${type.toLowerCase()}`;
+  if (/^(4010|4040):|:(not_authorized|no_token)$/.test(key)) return 401;
+  if (/^(4030|4061):|:(access_denied|secret_required)$/.test(key)) return 403;
+  if (/^4440:|:rate_limit$/.test(key)) return 429;
+  if (/^5030:|:service_unavailable$/.test(key)) return 503;
+  if (/^5000:|:failed$/.test(key)) return 502;
+  if (/^2040:|:no_results$/.test(key)) return 404;
+  if (/^2041:|:too_many_results$/.test(key)) return 422;
+  if (/^(4000|4060):|:(bad_query|secure_socket_required)$/.test(key)) return 400;
+  return httpStatus >= 400 ? httpStatus : 502;
+}
+
+function retryableValue(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") return value;
+  if (value === 1 || value === "1" || String(value).toLowerCase() === "true") return true;
+  if (value === 0 || value === "0" || String(value).toLowerCase() === "false") return false;
+  return undefined;
+}
+
+/** Handles both BERGMAN envelopes and provider error objects returned with HTTP 200. */
+export function applicationErrorDetails(payload: unknown, httpStatus: number): ApplicationErrorDetails | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const root = payload as Record<string, unknown>;
+  const nested = root.error && typeof root.error === "object" && !Array.isArray(root.error)
+    ? root.error as Record<string, unknown>
+    : null;
+  if (root.success !== false && !nested) return null;
+
+  const rawError = typeof root.error === "string" ? root.error : "";
+  const code = String(nested?.code ?? nested?.type ?? root.code ?? "API_ERROR").trim() || "API_ERROR";
+  const type = String(nested?.type ?? "").trim();
+  const message = String(nested?.message ?? nested?.msg ?? root.message ?? root.detail ?? rawError ?? "API request failed.").trim()
+    || "API request failed.";
+  const userMessage = String(nested?.display ?? root.display ?? message).trim() || message;
+  const status = errorStatus(code, type, httpStatus);
+  return {
+    status,
+    code,
+    message,
+    userMessage,
+    retryable: retryableValue(nested?.retryable ?? root.retryable) ?? (status === 429 || status >= 500),
+  };
 }
 
 function safeParseJson(text: string, method: string, url: string): unknown {
@@ -381,17 +420,24 @@ export async function httpJson<T>(
   const data = shouldParseJson
     ? safeParseJson(text, method, finalUrl)
     : undefined;
+  const embeddedError = applicationErrorDetails(data, res.status);
 
   logResponse(method, finalUrl, res.status, data ?? text);
 
   if (!res.ok) {
     const msg = `${method.toUpperCase()} ${finalUrl} -> HTTP ${res.status}: ${safeStringify(data ?? text)}`;
-    throw apiError(res.status, `HTTP_${res.status}`, msg);
+    throw apiError(embeddedError?.status ?? res.status, embeddedError?.code ?? `HTTP_${res.status}`, msg, embeddedError ? {
+      userMessage: embeddedError.userMessage,
+      retryable: embeddedError.retryable,
+    } : undefined);
   }
 
-  if (isApplicationError(data)) {
+  if (embeddedError) {
     const msg = `${method.toUpperCase()} ${finalUrl} -> API_ERROR: ${safeStringify(data)}`;
-    throw apiError(res.status, "API_ERROR", msg);
+    throw apiError(embeddedError.status, embeddedError.code, msg, {
+      userMessage: embeddedError.userMessage,
+      retryable: embeddedError.retryable,
+    });
   }
 
   return data as T;

@@ -50,6 +50,17 @@ The SDK examples use reader address `0xFF`, a four-byte access password, and EPC
 
 The examples document each result as a one-byte packet length followed by tag type, antenna, EPC data and RSSI. If bit `0x80` is set in the type byte, six timestamp bytes follow the RSSI area. The local bridge implements bounds checks and rejects truncated or invalid packets.
 
+## Presence state and six-inch calibration
+
+Continuous inventory responses are raw hardware observations, not accepted scan events. The shared RFID core now maintains presence by TID when available and EPC otherwise:
+
+- `OUT_OF_RANGE` to `IN_RANGE` emits one accepted entry event.
+- Further raw reads update presence but are marked `DUPLICATE_IN_RANGE` and do not emit another accepted event.
+- A tag must be absent for the configured timeout (default 1,000 ms) before an `EXIT_DETECTED` transition resets it for re-entry.
+- Antenna allowlisting and minimum RSSI filtering occur before presence acceptance. Raw decisions remain observable for calibration and diagnostics.
+
+The detection profile exposes desired RF power, antenna IDs, a maximum 15.24 cm target, absence timeout, duplicate suppression, re-entry, RSSI threshold and physical calibration evidence. The audited SDK surface does **not** contain a verified RF-power setter, so the bridge reports `rfPowerApplied: false` and `hardwareRangeGuaranteed: false`. Do not infer distance from RSSI. Use a validated near-field antenna, RF shielding, or a vendor-confirmed power-control API and physically test representative chips at 2, 4, 6, 8 and 12 inches before marking the profile calibrated.
+
 ## Race Upshot integration
 
 The bridge source is at `tools/ru5600-bridge/bridge.py`. It:
@@ -76,3 +87,11 @@ Verified bridge results are recorded through authenticated Race Upshot APIs. A p
 ## Required physical acceptance tests
 
 Before race-day production use, validate on the actual RU5600 and representative timing chips: device enumeration; reconnect; firmware/SN; single and continuous inventory; EPC packet length; RSSI/antenna; exactly-one-tag write gating; default and protected access-password behavior; variable EPC lengths supported by the tag; write/read-back; device removal during write; unknown-outcome reconciliation; repeated physical chip detection by TID; and bulk removal/replacement behavior.
+
+## EPC profiles and volunteer assignment
+
+The shared `@race-technology/rfid-core` package now owns EPC validation, reversible profile-based chip-number encoding/decoding, sequence generation, reader adapter contracts, and common RFID types. Race Upshot keeps inventory, authentication, participants, and timing mappings outside that hardware package.
+
+An EPC profile cannot be used for chip-number encoding unless an operator marks it physically verified and records the sample evidence. Validate at least three printed chip numbers against their complete EPC reads. Unmatched reads display `UNKNOWN EPC FORMAT`; Race Upshot never converts the complete hexadecimal EPC to decimal or strips an unknown prefix.
+
+Volunteer manual and QR assignments resolve through verified Race Upshot inventory and persist both the complete EPC and the human-readable chip number. Reader assignment is visible but remains unavailable on mobile until a trusted administrator-configured HTTPS bridge and authenticated pairing service are available. Arbitrary bridge URLs and pairing tokens are deliberately not accepted in the volunteer app.

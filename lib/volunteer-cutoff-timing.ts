@@ -1,6 +1,7 @@
 import type { LiveParticipant, LiveSplit } from "@/packages/contracts/src";
 import { getCanonicalLiveEvent } from "./canonical-live-tracking";
 import { getLiveTrackingHubConfig, type LiveTrackingHubConfig } from "./live-tracking-hub-config";
+import { resolveVolunteerTimingState } from "./volunteer-timing-state";
 
 export type CutoffState = "SAFE" | "WATCH" | "DANGER" | "OUT OF CUTOFF" | "DNF" | "NO CUTOFF";
 export interface CutoffTimingAthlete {
@@ -36,6 +37,8 @@ function elapsed(participant: LiveParticipant, config: LiveTrackingHubConfig, no
   return milliseconds === undefined ? final : Math.max(0, Math.floor(milliseconds / 1_000));
 }
 function cutoff(participant: LiveParticipant, config: LiveTrackingHubConfig, elapsedSeconds: number | null, nowMs: number) {
+  if (normalized(participant.raceStatus) === "FINISHED") return { label: "Finished", deadline: null, remainingSeconds: null, status: "NO CUTOFF" as const };
+  if (normalized(participant.raceStatus) === "DNF") return { label: "DNF", deadline: null, remainingSeconds: null, status: "DNF" as const };
   const done = completed(participant);
   const legs = [...config.legs].toSorted((left, right) => left.order - right.order);
   const currentLeg = legs.find((leg) => leg.id === participant.currentLeg || leg.name.toLowerCase() === participant.currentLeg?.toLowerCase());
@@ -56,13 +59,14 @@ function cutoff(participant: LiveParticipant, config: LiveTrackingHubConfig, ela
 
 export function buildVolunteerCutoffTimingPayload(participants: LiveParticipant[], config: LiveTrackingHubConfig, now = new Date()): VolunteerCutoffTimingPayload {
   const nowMs = now.getTime();
-  const athletes = participants.map((participant): CutoffTimingAthlete => {
+  const athletes = participants.map((source): CutoffTimingAthlete => {
+    const { participant, config: scopedConfig } = resolveVolunteerTimingState(source, config);
     const raceStatus = normalized(participant.raceStatus);
     const finished = raceStatus === "FINISHED";
     const started = finished || (!TERMINAL.has(raceStatus) && !["NOT_STARTED", "UNKNOWN"].includes(raceStatus)) || participant.splits.some(accepted);
     const last = [...participant.splits].filter(accepted).at(-1);
-    const elapsedSeconds = elapsed(participant, config, nowMs);
-    return { id: participant.participantUid, bib: participant.bib || "—", name: participant.fullName || participant.displayName || "Athlete", category: participant.contestName || "—", status: raceStatus, currentLeg: String(participant.currentLeg || (started ? "ON COURSE" : "NOT STARTED")).replaceAll("_", " "), currentSplit: participant.latestTimingPoint || last?.name || "—", started, finished, cutoff: cutoff(participant, config, elapsedSeconds, nowMs) };
+    const elapsedSeconds = elapsed(participant, scopedConfig, nowMs);
+    return { id: participant.participantUid, bib: participant.bib || "—", name: participant.fullName || participant.displayName || "Athlete", category: participant.contestName || "—", status: raceStatus, currentLeg: finished ? "FINISHED" : String(participant.currentLeg || (started ? "ON COURSE" : "NOT STARTED")).replaceAll("_", " "), currentSplit: participant.latestTimingPoint || last?.name || "—", started, finished, cutoff: !started ? { label: "Not started", deadline: null, remainingSeconds: null, status: "NO CUTOFF" } : cutoff(participant, scopedConfig, elapsedSeconds, nowMs) };
   });
   const monitored = athletes.filter((athlete) => athlete.started && !athlete.finished);
   return {

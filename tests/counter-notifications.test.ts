@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { counterTemplateSchema, counterTemplateTestSchema, emptyCounterTemplate, renderCounterEmail, waiverCheckinEmailMappings, withAutomaticWaiverStorage } from '../lib/counter-notification-contract';
+import { bikeCheckWhatsAppParameters, counterTemplateSchema, counterTemplateTestSchema, emptyCounterTemplate, renderCounterEmail, waiverCheckinEmailMappings, waiverCheckinWhatsAppParameters, withAutomaticWaiverStorage } from '../lib/counter-notification-contract';
 const mocks = vi.hoisted(() => ({ get: vi.fn(), put: vi.fn(), coordinatorFetch: vi.fn(), roster: vi.fn(), event: vi.fn(), email: vi.fn(), whatsapp: vi.fn() }));
 vi.mock('@opennextjs/cloudflare', () => ({ getCloudflareContext: async () => ({ env: { RACEUPSHOT: { get: mocks.get, put: mocks.put }, VOLUNTEER_OPERATIONS: { getByName: () => ({ fetch: mocks.coordinatorFetch }) } } }) }));
 vi.mock('../lib/participant-chip-assignments', () => ({ getAdminParticipantRoster: mocks.roster }));
@@ -42,10 +42,10 @@ describe('counter notifications', () => {
     mocks.get.mockImplementation(async (key: string) => key === legacyCounterConfigKey('event-a', 'CHECK_IN') ? legacy : null);
     await expect(readCounterTemplate('event-a', 'CHECK_IN')).resolves.toMatchObject({ whatsapp: { templateName: 'legacy_event_template' } });
   });
-  it('defaults bike check-in and checkout to athlete, action date, action time and event parameters', async () => {
+  it('defaults bike check-in and checkout to the five AiSensy API template parameters', async () => {
     mocks.get.mockResolvedValue(null);
-    await expect(readCounterTemplate('event-a', 'BIKE_IN')).resolves.toMatchObject({ whatsapp: { parameters: ['name', 'action_date', 'action_time', 'event_name'] } });
-    await expect(readCounterTemplate('event-a', 'BIKE_OUT')).resolves.toMatchObject({ whatsapp: { parameters: ['name', 'action_date', 'action_time', 'event_name'] } });
+    await expect(readCounterTemplate('event-a', 'BIKE_IN')).resolves.toMatchObject({ whatsapp: { parameters: bikeCheckWhatsAppParameters } });
+    await expect(readCounterTemplate('event-a', 'BIKE_OUT')).resolves.toMatchObject({ whatsapp: { parameters: bikeCheckWhatsAppParameters } });
   });
   it('defaults waiver check-in to Bergtecno template #34 and its six provider variables', async () => {
     mocks.get.mockResolvedValue(null);
@@ -63,6 +63,64 @@ describe('counter notifications', () => {
     await expect(readCounterTemplate('event-a', 'WAIVER_VERIFY')).resolves.toMatchObject({
       email: { mappings: waiverCheckinEmailMappings },
     });
+  });
+  it('repairs all-name parameters for the known AiSensy waivercheckin campaign', async () => {
+    const saved = emptyCounterTemplate('WAIVER_VERIFY');
+    saved.whatsapp.campaignName = 'waivercheckin';
+    saved.whatsapp.parameters = ['name', 'name', 'name', 'name', 'name'];
+    mocks.coordinatorFetch.mockResolvedValue(Response.json({ ok: true, record: { template: saved } }));
+    await expect(readCounterTemplate('event-a', 'WAIVER_VERIFY')).resolves.toMatchObject({
+      whatsapp: { parameters: waiverCheckinWhatsAppParameters },
+    });
+  });
+  it('repairs stale bike campaign parameters to the approved four-value order', async () => {
+    const saved = emptyCounterTemplate('BIKE_IN');
+    saved.whatsapp.campaignName = 'bikecheckin1';
+    saved.whatsapp.parameters = ['name', 'event_name', 'action_date', 'action_time', 'event_name'];
+    mocks.coordinatorFetch.mockResolvedValue(Response.json({ ok: true, record: { template: saved } }));
+    await expect(readCounterTemplate('event-a', 'BIKE_IN')).resolves.toMatchObject({
+      email: { enabled: false },
+      whatsapp: { campaignName: 'bikecheckin1', parameters: bikeCheckWhatsAppParameters },
+    });
+  });
+  it('keeps the AiSensy bike API campaign names and enables an untouched bike email channel', async () => {
+    const checkin = emptyCounterTemplate('BIKE_IN');
+    checkin.whatsapp = { ...checkin.whatsapp, enabled: true, campaignName: 'bikecheckin1', templateName: 'bikecheckin1' };
+    mocks.coordinatorFetch.mockResolvedValueOnce(Response.json({ ok: true, record: { template: checkin } }));
+    await expect(readCounterTemplate('event-a', 'BIKE_IN')).resolves.toMatchObject({
+      email: { enabled: true, configured: false, mode: 'CUSTOM' },
+      whatsapp: { campaignName: 'bikecheckin1', templateName: 'bikecheckin1' },
+    });
+
+    const checkout = emptyCounterTemplate('BIKE_OUT');
+    checkout.whatsapp = { ...checkout.whatsapp, enabled: true, campaignName: 'bikecheckout1', templateName: 'bikecheckout1' };
+    mocks.coordinatorFetch.mockResolvedValueOnce(Response.json({ ok: true, record: { template: checkout } }));
+    await expect(readCounterTemplate('event-a', 'BIKE_OUT')).resolves.toMatchObject({
+      email: { enabled: true, configured: false, mode: 'CUSTOM' },
+      whatsapp: { campaignName: 'bikecheckout1', templateName: 'bikecheckout1' },
+    });
+  });
+  it('respects an explicitly disabled bike email channel', async () => {
+    const saved = emptyCounterTemplate('BIKE_OUT');
+    saved.email.configured = true;
+    saved.whatsapp = { ...saved.whatsapp, enabled: true, campaignName: 'bikecheckout1', templateName: 'bikecheckout1' };
+    mocks.coordinatorFetch.mockResolvedValue(Response.json({ ok: true, record: { template: saved } }));
+    await expect(readCounterTemplate('event-a', 'BIKE_OUT')).resolves.toMatchObject({ email: { enabled: false, configured: true } });
+  });
+  it('dispatches both channels from the previously saved production bike configuration', async () => {
+    const saved = emptyCounterTemplate('BIKE_OUT');
+    saved.whatsapp = { ...saved.whatsapp, enabled: true, campaignName: 'bikecheckout1', templateName: 'bikecheckout1' };
+    mocks.coordinatorFetch.mockResolvedValue(Response.json({ ok: true, record: { template: saved } }));
+    await dispatchCounterNotifications({ ...operation, action: 'BIKE_OUT' });
+    expect(mocks.email).toHaveBeenCalledWith(expect.objectContaining({
+      recipientEmail: 'runner@example.com',
+      subject: 'Race · Bike checkout',
+      singleAttempt: true,
+    }));
+    expect(mocks.whatsapp).toHaveBeenCalledWith(expect.objectContaining({
+      campaignName: 'bikecheckout1',
+      parameters: ['Runner', 'Race', '8 Oct 2026', '03:30 pm', 'Race'],
+    }));
   });
   it('persists the Bergtecno #34 template ID in strongly consistent shared storage and reads it after refresh', async () => {
     const stored = new Map<string, { template: unknown; updatedAt: string; updatedBy: string }>();
@@ -116,10 +174,10 @@ describe('counter notifications', () => {
   });
   it('formats bike action date and time in the event timezone', async () => {
     const t = emptyCounterTemplate('BIKE_IN');
-    t.whatsapp = { ...t.whatsapp, enabled: true, campaignName: 'Bike check in successful' };
+    t.whatsapp = { ...t.whatsapp, enabled: true, campaignName: 'bikecheckin1' };
     mocks.get.mockResolvedValue(t); await dispatchCounterNotifications(operation);
     expect(mocks.whatsapp).toHaveBeenCalledWith(expect.objectContaining({
-      parameters: ['Runner', '8 Oct 2026', '03:30 pm', 'Race'],
+      parameters: ['Runner', 'Race', '8 Oct 2026', '03:30 pm', 'Race'],
     }));
   });
   it('never falls back to a different participant with the same BIB', async () => {
@@ -197,7 +255,7 @@ describe('counter notifications', () => {
       },
     }));
   });
-  it('includes sample media when testing an AiSensy document-header campaign', async () => {
+  it('includes sample media and the corrected values when testing the waivercheckin campaign', async () => {
     const t = emptyCounterTemplate();
     t.whatsapp.campaignName = 'waivercheckin';
     t.whatsapp.attachWaiver = true;
@@ -207,7 +265,7 @@ describe('counter notifications', () => {
       recipientPhone: '918390288857',
       userName: 'Test Athlete',
       campaignName: 'waivercheckin',
-      parameters: ['Test Athlete', 'Test Athlete', 'Test Athlete', 'Test Athlete', 'Test Athlete'],
+      parameters: ['Test Athlete', 'Race', 'Test Category', 'TEST-001', expect.any(String)],
       document: {
         link: 'https://d3jt6ku4g6z5l8.cloudfront.net/FILE/6353da2e153a147b991dd812/4079142_dummy.pdf',
         filename: 'sample_media',

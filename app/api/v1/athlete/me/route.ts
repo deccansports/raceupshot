@@ -38,10 +38,21 @@ export async function PUT(request: Request) {
   try {
     const athlete = await requireAthlete(request);
     const body = await request.json() as Record<string, unknown>;
-    const requestedVisibility = String(body.trackingVisibility ?? body.liveTrackingPrivacy ?? "").trim().toUpperCase();
-    const privacyOnly = Object.keys(body).every((key) => key === "trackingVisibility" || key === "liveTrackingPrivacy");
+    const requestedVisibility = String(
+      body.trackingVisibility
+      ?? body.liveTrackingPrivacy
+      ?? body.liveTrackingVisibility
+      ?? body.visibility
+      ?? "",
+    ).trim().toUpperCase();
+    const privacyOnly = Object.keys(body).every((key) => [
+      "trackingVisibility",
+      "liveTrackingPrivacy",
+      "liveTrackingVisibility",
+      "visibility",
+    ].includes(key));
     if (privacyOnly && (requestedVisibility === "PUBLIC" || requestedVisibility === "ANONYMOUS")) {
-      const profile = await saveAthleteTrackingVisibility(athlete.uid, athlete.email, requestedVisibility);
+      const profile = await saveAthleteTrackingVisibility(athlete.uid, athlete.email, requestedVisibility, athlete.name);
       return platformSuccess({ ...athlete, profile }, { cacheSeconds: 0 }, {
         headers: { "cache-control": "private, no-store" },
       });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildFeibotCanonicalParticipantRows, normalizedParticipantRows } from "@/lib/feibot-integration";
+import { AUTOMATIC_FEIBOT_RESULT_FEEDS, buildFeibotCanonicalParticipantRows, isAuthoritativeParticipantPayload, isFeibotResultFeedDue, normalizedParticipantRows, shouldReconcileFeibotRoster } from "@/lib/feibot-integration";
 import { normalizeFeibotParticipant } from "@/packages/timing-core/src";
 
 describe("Feibot participant canonicalization", () => {
@@ -42,5 +42,29 @@ describe("Feibot participant canonicalization", () => {
     );
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ participantUid: "provider-1", bib: "1001", chipCode: "FEIBOT-1", status: "FINISHED", elapsedTime: "01:00:00" });
+  });
+
+  it("treats an explicitly empty Feibot roster as an authoritative deletion", () => {
+    expect(isAuthoritativeParticipantPayload({ data: { participants: [] } })).toBe(true);
+    expect(isAuthoritativeParticipantPayload({ message: "temporary upstream response" })).toBe(false);
+  });
+
+  it("periodically reconciles the complete roster without polling the forbidden process feed", () => {
+    expect(AUTOMATIC_FEIBOT_RESULT_FEEDS.map((feed) => feed.endpoint)).toEqual([
+      "/temporary/temporary_ResultDataGetAll",
+      "/finishResultGetAll",
+    ]);
+    expect(shouldReconcileFeibotRoster(null, Date.parse("2026-10-19T08:00:00Z"))).toBe(true);
+    expect(shouldReconcileFeibotRoster("2026-10-19T07:58:00Z", Date.parse("2026-10-19T08:00:00Z"))).toBe(false);
+    expect(shouldReconcileFeibotRoster("2026-10-19T07:54:00Z", Date.parse("2026-10-19T08:00:00Z"))).toBe(true);
+  });
+
+  it("paces live and final result feeds independently", () => {
+    const now = Date.parse("2026-10-19T08:00:00Z");
+    expect(isFeibotResultFeedDue("/temporary/temporary_ResultDataGetAll", null, now)).toBe(true);
+    expect(isFeibotResultFeedDue("/temporary/temporary_ResultDataGetAll", "2026-10-19T07:59:30Z", now)).toBe(false);
+    expect(isFeibotResultFeedDue("/temporary/temporary_ResultDataGetAll", "2026-10-19T07:59:00Z", now)).toBe(true);
+    expect(isFeibotResultFeedDue("/finishResultGetAll", "2026-10-19T07:56:00Z", now)).toBe(false);
+    expect(isFeibotResultFeedDue("/finishResultGetAll", "2026-10-19T07:55:00Z", now)).toBe(true);
   });
 });

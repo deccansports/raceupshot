@@ -42,6 +42,31 @@ def clean_hex(value: Any, field: str, exact_bytes: int | None = None) -> str:
     return text
 
 
+def validated_detection_config(value: dict[str, Any]) -> dict[str, Any]:
+    config = {
+        "rfPowerDbm": None, "antennaIds": [], "targetRangeCm": 15.24, "absenceTimeoutMs": 1000,
+        "singleReadPerEntry": True, "reentryDetection": True, "suppressDuplicateInventory": True,
+        "rssiThreshold": None, "presenceMonitoring": True, "physicallyCalibrated": False,
+        "calibrationMethod": "UNVERIFIED", "calibrationNotes": "",
+        **value,
+    }
+    if config["rfPowerDbm"] is not None and not -30 <= float(config["rfPowerDbm"]) <= 36:
+        raise ValueError("RF power must be between -30 and 36 dBm.")
+    if not 0 < float(config["targetRangeCm"]) <= 15.24:
+        raise ValueError("Detection target cannot exceed 15.24 cm.")
+    if not isinstance(config["absenceTimeoutMs"], int) or not 100 <= config["absenceTimeoutMs"] <= 60000:
+        raise ValueError("Absence timeout must be between 100 and 60000 ms.")
+    if config["rssiThreshold"] is not None and not -120 <= float(config["rssiThreshold"]) <= 0:
+        raise ValueError("RSSI threshold must be between -120 and 0 dBm.")
+    config["antennaIds"] = sorted({int(item) for item in config.get("antennaIds", [])})
+    if any(item < 1 or item > 64 for item in config["antennaIds"]):
+        raise ValueError("Invalid antenna selection.")
+    config["calibrationNotes"] = str(config.get("calibrationNotes", "")).strip()
+    if config["physicallyCalibrated"] and (config["calibrationMethod"] == "UNVERIFIED" or len(config["calibrationNotes"]) < 10):
+        raise ValueError("Physical calibration requires a method and bench-test notes.")
+    return config
+
+
 class ReaderError(RuntimeError):
     pass
 
@@ -246,6 +271,7 @@ class BridgeState:
         self.token = token
         self.allowed_origins = {origin.strip() for origin in os.environ.get("RU5600_TRUSTED_ORIGINS", "https://raceupshot.hidden-limit-41e6.workers.dev,http://localhost:3001").split(",") if origin.strip()}
         self.reader = Ru5600Native(library)
+        self.detection_config = validated_detection_config({})
         self.lock = threading.Lock()
         self.audit_path = Path(os.environ.get("RU5600_AUDIT_LOG", str(Path.home() / ".raceupshot" / "ru5600-audit.jsonl"))).expanduser()
         self.audit_path.parent.mkdir(parents=True, exist_ok=True)
@@ -343,6 +369,16 @@ class Handler(BaseHTTPRequestHandler):
                     STATE.reader.start_inventory(); result = {"inventoryActive": True}
                 elif self.path == "/v1/inventory/stop":
                     STATE.reader.stop_inventory(); result = {"inventoryActive": False}
+                elif self.path == "/v1/configuration":
+                    STATE.detection_config = validated_detection_config(body)
+                    result = {
+                        "config": STATE.detection_config,
+                        "rfPowerApplied": False,
+                        "antennaSelectionApplied": bool(STATE.detection_config["antennaIds"]),
+                        "rssiFilterApplied": STATE.detection_config["rssiThreshold"] is not None,
+                        "hardwareRangeGuaranteed": False,
+                        "warnings": ["The audited SWHidApi surface has no verified RF-power command. Validate the 15.24 cm zone using a near-field antenna and/or shielding."],
+                    }
                 elif self.path == "/v1/write-epc":
                     password = clean_hex(body.get("accessPassword", "00000000"), "accessPassword", 4)
                     result = STATE.reader.write_epc(body.get("currentEpc", ""), body.get("requestedEpc", ""), password)

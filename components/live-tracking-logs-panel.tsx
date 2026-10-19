@@ -6,6 +6,7 @@ import type { AdminLiveParticipantDetail } from "@/lib/platform-repository";
 import { Activity, AlertTriangle, Check, Database, Eye, Flag, MapPin, Medal, Pencil, Play, RefreshCw, Route, Save, ScrollText, Search, Square, Timer, Trash2, Trophy, UserRound, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { TimingDecisionDebugAdmin } from "./timing-decision-debug-admin";
+import { TimingCorrectionsAdmin } from './timing-corrections-admin';
 
 interface LogsEvent {
   id: string;
@@ -269,7 +270,7 @@ export function LiveTrackingLogsPanel({ event, dashboard, busy, run, refresh, re
     </div>
     {athleteLoading&&<div className="hub-athlete-loading"><Activity className="spin"/> Loading canonical athlete record…</div>}
     {athleteError&&<div className="success-banner cms-error-banner"><AlertTriangle/> {athleteError}</div>}
-    {athleteDetail&&<AdminAthleteModal detail={athleteDetail} close={()=>setAthleteDetail(null)}/>}
+    {athleteDetail&&<AdminAthleteModal detail={athleteDetail} close={()=>setAthleteDetail(null)} updated={async()=>{ await openAthlete(athleteDetail.participant.participantUid); await refresh(); }}/>}
 
     <TimingDecisionDebugAdmin events={[event]} embedded />
 
@@ -291,7 +292,7 @@ function AdminAthleteFacts({ rows }: { rows: Array<[string, string | number | nu
   return <div className="hub-athlete-facts">{rows.map(([label,value])=><span key={label}><small>{label}</small><b>{value===null||value===undefined||value===""?"—":value}</b></span>)}</div>;
 }
 
-function AdminAthleteModal({ detail, close }: { detail: AdminLiveParticipantDetail; close: () => void }) {
+function AdminAthleteModal({ detail, close, updated }: { detail: AdminLiveParticipantDetail; close: () => void; updated: () => Promise<void> }) {
   const athlete=detail.participant;
   const identity=detail.identity;
   const status=athlete.raceStatus.replaceAll("_"," ");
@@ -299,6 +300,7 @@ function AdminAthleteModal({ detail, close }: { detail: AdminLiveParticipantDeta
     <section className="hub-athlete-modal" role="dialog" aria-modal="true" aria-label={`${athlete.displayName} athlete details`} onMouseDown={event=>event.stopPropagation()}>
       <header><div className="hub-athlete-avatar">{athlete.initials||"RU"}</div><div><small>{detail.event.name} · CANONICAL ATHLETE</small><h2>{athlete.displayName} <em>· Bib {athlete.bib||"—"}</em></h2><p>Version-pinned participant identity, race state, rankings and split timeline.</p></div><span className={`hub-race-status ${/finish/.test(athlete.raceStatus)?"finished":/start|progress|racing/.test(athlete.raceStatus)?"racing":"registered"}`}>{status}</span><button className="hub-athlete-modal-close" onClick={close} aria-label="Close athlete details"><X/></button></header>
       <div className="hub-athlete-modal-scroll">
+        <TimingCorrectionsAdmin key={athlete.participantUid} eventId={detail.event.id} participantId={athlete.participantUid} updated={updated}/>
         <div className="hub-athlete-metrics"><span><Timer/><small>ELAPSED</small><b>{athlete.elapsedTime||athlete.cumulativeTime||"—"}</b></span><span><MapPin/><small>CURRENT SPLIT</small><b>{identity.currentSplit||athlete.latestTimingPoint||"Waiting for read"}</b></span><span><Trophy/><small>OVERALL</small><b>{athlete.overallRank?`#${athlete.overallRank}`:"—"}</b></span><span><Medal/><small>AGE GROUP</small><b>{athlete.ageGroupRank?`#${athlete.ageGroupRank}`:"—"}</b></span></div>
         <div className="hub-athlete-detail-grid"><section><h3><UserRound/> Athlete identity</h3><AdminAthleteFacts rows={[["Name",athlete.displayName],["Bib",athlete.bib],["Chip code",identity.chipCode],["Contest",athlete.contestName],["Participant UUID",athlete.participantUid],["Provider participant UUID",identity.providerParticipantUuid],["Feibot event UUID",identity.providerEventUuid],["Contest UUID",identity.contestUuid],["Age group",athlete.ageGroup||"Not provided by Feibot"],["Gender",athlete.gender||"Not provided by Feibot"],["Date of birth",identity.dateOfBirth],["Club",athlete.club||"Not provided by Feibot"],["Country",athlete.country||"Not provided by Feibot"],["Tracking visibility",athlete.visibility],["Wave start",identity.waveStartTime?displayTime(identity.waveStartTime):"Not configured"],["Roster email",identity.email||"Not provided by Feibot"]]}/></section>
           <section><h3><Flag/> Race state</h3><AdminAthleteFacts rows={[["Status",status],["Status detail",identity.statusDetail],["Current leg",athlete.currentLeg],["Current split",identity.currentSplit||athlete.latestTimingPoint],["Official / chip start",displayTime(identity.acceptedStartTime)],["Finish",displayTime(identity.finishTime)],["Elapsed",athlete.elapsedTime||athlete.cumulativeTime],["Distance completed",athlete.distanceCompletedKm!==undefined?`${athlete.distanceCompletedKm.toFixed(2)} km`:null],["Official progress",athlete.progressPercent!==undefined?`${athlete.progressPercent.toFixed(1)}%`:null],["Estimated finish",displayTime(athlete.estimatedFinishAt)],["Overall rank",athlete.overallRank?`#${athlete.overallRank}`:null],["Gender rank",athlete.genderRank?`#${athlete.genderRank}`:null],["Age group rank",athlete.ageGroupRank?`#${athlete.ageGroupRank}`:null]]}/></section></div>

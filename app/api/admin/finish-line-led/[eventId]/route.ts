@@ -2,6 +2,7 @@ import { requireAdmin } from "@/lib/admin-guard";
 import { apiFailure, apiSuccess } from "@/lib/api-response";
 import { getFinishLineLedConfig, saveFinishLineLedConfig } from "@/lib/finish-line-led";
 import { z } from "@/lib/zod";
+import { LED_FIELD_IDS } from "@/lib/finish-line-led-fields";
 
 export const dynamic = "force-dynamic";
 
@@ -13,7 +14,9 @@ const logoInput = z.object({
 });
 
 const configInput = z.object({
-  logos: z.array(logoInput).max(40),
+  syncEventLogos: z.boolean().optional(),
+  visibleFields: z.array(z.enum(LED_FIELD_IDS)).min(1).max(LED_FIELD_IDS.length).optional(),
+  logos: z.array(logoInput).max(140),
   idleRotationSeconds: z.number().int().min(3).max(30),
   finisherRotationSeconds: z.number().int().min(3).max(30),
 });

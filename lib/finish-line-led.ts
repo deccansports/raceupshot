@@ -5,6 +5,8 @@ import { getEventBySlug, getEventPartners } from "./raceupshot-repository";
 import { finishLineClockWindow, maximumFinishCutoffSeconds } from "./finish-line-clock";
 import { resolveConfiguredFinishers } from "./live-leaderboard";
 import { getPublicLiveParticipants } from "./platform-repository";
+import { normalizeLedFields, type LedField } from "./finish-line-led-fields";
+import { resolveLedLogos } from "./finish-line-led-logos";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -31,6 +33,8 @@ export interface FinishLineLedLogo {
 }
 
 export interface FinishLineLedConfig {
+  syncEventLogos?: boolean;
+  visibleFields?: LedField[];
   logos: FinishLineLedLogo[];
   idleRotationSeconds: number;
   finisherRotationSeconds: number;
@@ -88,7 +92,9 @@ async function resolvedDisplayConfig(binding: KVNamespace, event: Awaited<Return
     ...(partners ?? []).map((partner) => ({ id: `partner:${partner.id}`, name: partner.name, logoUrl: partner.logoUrl, kind: "SPONSOR" as const })),
   ];
   return {
-    logos: raw && Array.isArray(raw.logos) ? configured : defaults,
+    visibleFields: normalizeLedFields(raw?.visibleFields),
+    syncEventLogos: raw?.syncEventLogos !== false,
+    logos: resolveLedLogos(defaults, configured, raw?.syncEventLogos !== false),
     idleRotationSeconds: rotationSeconds(raw?.idleRotationSeconds, DEFAULT_CONFIG.idleRotationSeconds),
     finisherRotationSeconds: rotationSeconds(raw?.finisherRotationSeconds, DEFAULT_CONFIG.finisherRotationSeconds),
   };
@@ -111,7 +117,9 @@ export async function saveFinishLineLedConfig(eventIdOrSlug: string, input: Fini
   if (!event) return null;
   const binding = await kv();
   const config: FinishLineLedConfig = {
-    logos: input.logos.map(normalizeLogo).filter((logo): logo is FinishLineLedLogo => Boolean(logo)).slice(0, 40),
+    syncEventLogos: input.syncEventLogos !== false,
+    visibleFields: normalizeLedFields(input.visibleFields),
+    logos: input.logos.map(normalizeLogo).filter((logo): logo is FinishLineLedLogo => Boolean(logo)).slice(0, 140),
     idleRotationSeconds: rotationSeconds(input.idleRotationSeconds, DEFAULT_CONFIG.idleRotationSeconds),
     finisherRotationSeconds: rotationSeconds(input.finisherRotationSeconds, DEFAULT_CONFIG.finisherRotationSeconds),
   };

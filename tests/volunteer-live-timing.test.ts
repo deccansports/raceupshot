@@ -3,6 +3,7 @@ import type { LiveParticipant } from "@/packages/contracts/src";
 import { defaultLiveTrackingHubConfig } from "@/lib/live-tracking-hub-config";
 import { buildVolunteerLiveTimingPayload } from "@/lib/volunteer-live-timing";
 import { buildVolunteerCutoffTimingPayload } from "@/lib/volunteer-cutoff-timing";
+import { matchesCutoffFilter } from "@/apps/volunteer-mobile/src/cutoffView";
 
 function athlete(overrides: Partial<LiveParticipant>): LiveParticipant {
   return {
@@ -37,6 +38,72 @@ function hub() {
 }
 
 describe("volunteer live timing", () => {
+  it("keeps all seven available while monitoring only the two unfinished athletes", () => {
+    const participants = Array.from({ length: 7 }, (_, index) => athlete({ participantUid: String(index),
+      raceStatus: "STARTED", splits: index < 5 ? [{ splitId: "finish", name: "Finish", splitTime: "00:30:00", cumulativeTime: "03:06:54" }] : athlete({}).splits,
+    }));
+    const result = buildVolunteerCutoffTimingPayload(participants, hub(), new Date("2026-10-07T03:40:00Z"));
+    expect(result.overview).toMatchObject({ total: 7, racing: 2 });
+    expect(result.athletes.filter((row) => matchesCutoffFilter(row, "ALL"))).toHaveLength(7);
+    expect(result.athletes.filter((row) => matchesCutoffFilter(row, "FINISHED"))).toHaveLength(5);
+    expect(result.athletes.filter((row) => matchesCutoffFilter(row, "MONITOR"))).toHaveLength(2);
+    for (const row of result.athletes.filter((row) => row.finished)) {
+      expect(row.cutoff).toMatchObject({ status: "NO CUTOFF", deadline: null, remainingSeconds: null });
+      expect(row.currentLeg).toBe("FINISHED");
+    }
+  });
+
+  it("keeps all finishers out of cutoff monitoring even long after the cutoff", () => {
+    const result = buildVolunteerCutoffTimingPayload([athlete({ raceStatus: "STARTED", splits: [{ splitId: "finish", name: "Finish", splitTime: "00:30:00", cumulativeTime: "03:06:54" }] })], hub(), new Date("2026-10-08T00:00:00Z"));
+    expect(result.overview).toMatchObject({ racing: 0, outOfCutoff: 0, approachingCutoff: 0, withinCutoff: 0 });
+    expect(matchesCutoffFilter(result.athletes[0], "MONITOR")).toBe(false);
+  });
+
+  it("shows not-started and unconfigured athletes in All, and retains DNF without a cutoff", () => {
+    const config = hub();
+    config.legs = [];
+    config.splits = [];
+    config.start.overallCutoffSeconds = null;
+    const result = buildVolunteerCutoffTimingPayload([
+      athlete({ participantUid: "waiting", raceStatus: "NOT_STARTED", splits: [] }),
+      athlete({ participantUid: "active" }),
+      athlete({ participantUid: "dnf", raceStatus: "DNF" }),
+    ], config);
+    expect(result.athletes.filter((row) => matchesCutoffFilter(row, "ALL"))).toHaveLength(3);
+    expect(result.athletes.filter((row) => matchesCutoffFilter(row, "MONITOR")).map((row) => row.id)).toEqual(["dnf"]);
+    expect(result.athletes.filter((row) => matchesCutoffFilter(row, "DNF")).map((row) => row.id)).toEqual(["dnf"]);
+  });
+  it("moves a stale STARTED athlete with an accepted logical finish out of on-course and approaching counts", () => {
+    const result = buildVolunteerLiveTimingPayload([athlete({ raceStatus: "STARTED", currentLeg: undefined,
+      splits: [{ splitId: "finish", name: "Finish", cumulativeTime: "03:06:54", splitTime: "00:30:00", timestamp: "2026-10-07T03:36:54Z" }],
+    })], hub());
+    expect(result.overview).toMatchObject({ finished: 1, onCourse: 0, remaining: 0 });
+    expect(result.approaching).toEqual([]);
+    expect(result.recentFinishers[0]).toMatchObject({ status: "FINISHED", currentLeg: "FINISHED", nextSplit: "Finished", overallSeconds: 11214 });
+  });
+
+  it.each(["PENDING", "MISSING", "INVALID", "REJECTED"])("does not accept a %s finish read", (status) => {
+    const result = buildVolunteerLiveTimingPayload([athlete({ splits: [{ splitId: "finish", name: "Finish", status, cumulativeTime: "03:06:54", splitTime: "00:30:00" }] })], hub());
+    expect(result.overview.finished).toBe(0);
+    expect(result.overview.onCourse).toBe(1);
+  });
+
+  it.each(["DNF", "DSQ", "CUTOFF_PENDING"] as const)("preserves %s despite a finish read", (raceStatus) => {
+    const result = buildVolunteerLiveTimingPayload([athlete({ raceStatus, splits: [{ splitId: "finish", name: "Finish", cumulativeTime: "03:06:54", splitTime: "00:30:00" }] })], hub());
+    expect(result.overview.finished).toBe(0);
+    expect(result.athletes[0].status).toBe(raceStatus);
+  });
+
+  it("does not use another contest's finish or send next split backwards to a missed checkpoint", () => {
+    const config = hub();
+    config.splits.splice(1, 0, { ...config.splits[0], id: "missed", name: "Bike 20k", order: 1.5 });
+    config.splits.push({ ...config.splits[1], id: "other-finish", name: "Other Finish", order: 4, providerContestUuid: "other" });
+    const result = buildVolunteerLiveTimingPayload([athlete({ contestId: "olympic", splits: [{ splitId: "finish", name: "Finish", cumulativeTime: "03:06:54", splitTime: "00:30:00" }] })], config);
+    expect(result.overview.finished).toBe(1);
+    expect(result.athletes[0].nextSplit).toBe("Finished");
+    const unfinished = buildVolunteerLiveTimingPayload([athlete({ splits: [{ splitId: "missed", name: "Bike 20k", cumulativeTime: "01:00:00", splitTime: "00:30:00" }] })], hubWithMissedStart(config));
+    expect(unfinished.athletes[0].nextSplit).toBe("Finish");
+  });
   it("builds finish-line totals, approaching athletes and recent finishers", () => {
     const result = buildVolunteerLiveTimingPayload([
       athlete({ participantUid: "not-started", bib: "100", raceStatus: "NOT_STARTED", currentLeg: undefined, splits: [] }),
@@ -58,3 +125,7 @@ describe("volunteer live timing", () => {
     expect(result.overview.outOfCutoff).toBe(1);
   });
 });
+
+function hubWithMissedStart(config: ReturnType<typeof hub>) {
+  return { ...config, splits: config.splits.filter((split) => !split.providerContestUuid) };
+}

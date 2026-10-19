@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { resolveCanonicalRaceState } from "../apps/mobile/src/features/tracking/timing/canonicalRaceState";
 
-const row = (name: string, status: string) => ({ name, status });
+const row = (name: string, status: string, isRaceFinish = false) => ({ name, status, isRaceFinish });
 
 describe("canonical athlete race state", () => {
   test("has one lifecycle outcome for header, progress, split flow and prediction", () => {
@@ -9,7 +9,7 @@ describe("canonical athlete race state", () => {
       [{ sections: [{ status: "not_started", rows: [row("Start", "missing")] }] }, "NOT_STARTED", false],
       [{ sections: [{ status: "in_progress", rows: [row("Start", "valid"), row("Finish", "missing")] }] }, "IN_PROGRESS", true],
       [{ sections: [{ status: "in_progress", rows: [row("Start", "valid"), row("Run 5K", "valid"), row("Finish", "missing")] }] }, "IN_PROGRESS", true],
-      [{ sections: [{ status: "completed", rows: [row("Start", "valid"), row("Finish", "valid")] }] }, "FINISHED", false],
+      [{ sections: [{ status: "completed", rows: [row("Start", "valid"), row("Finish", "valid", true)] }] }, "FINISHED", false],
     ] as const;
     for (const [input, expectedStatus, expectedPrediction] of cases) {
       const state = resolveCanonicalRaceState(input);
@@ -28,7 +28,7 @@ describe("canonical athlete race state", () => {
   test("an accepted Finish always wins over stale NOT_STARTED metadata", () => {
     const state = resolveCanonicalRaceState({
       resultStatus: "NOT_STARTED",
-      sections: [{ status: "in_progress", rows: [row("Start", "valid"), row("Finish", "valid")] }],
+      sections: [{ status: "in_progress", rows: [row("Start", "valid"), row("Finish", "valid", true)] }],
     });
     expect(state.status).toBe("FINISHED");
     expect(state.hasConfirmedFinish).toBe(true);

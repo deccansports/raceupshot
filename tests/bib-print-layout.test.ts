@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
-import { defaultPrintTemplate, fixedPrintLayout, matchesPrintGender, printPages, renderPrintHtml, repairStandardA5Template, selectPrintParticipants, sortParticipantsByBib, TWELVE_BY_EIGHTEEN_FOUR_A5_LAYOUT, type PrintParticipant } from "../lib/bib-print-layout";
+import { defaultPrintTemplate, fixedPrintLayout, matchesPrintGender, printElementText, printPages, renderPrintHtml, repairStandardA5Template, selectPrintParticipants, sortParticipantsByBib, TWELVE_BY_EIGHTEEN_FOUR_A5_LAYOUT, type PrintParticipant, type PrintTemplateElement } from "../lib/bib-print-layout";
 import { fourUpBibPlacement } from "../lib/bib-print-pdf";
 
 const athlete = (bib: string, overrides: Partial<PrintParticipant> = {}): PrintParticipant => ({
@@ -104,6 +104,19 @@ describe("BIB print layout", () => {
     expect(matchesPrintGender("M", "MALE")).toBe(true);
     expect(matchesPrintGender("female", "FEMALE")).toBe(true);
     expect(matchesPrintGender("F", "MALE")).toBe(false);
+  });
+  it("renders relay team name and the extended participant columns", () => {
+    const template = defaultPrintTemplate("event-1", "olympic", "BIB");
+    const base = template.elements[0] as PrintTemplateElement;
+    const participant = athlete("1501", {
+      relayTeamName: "BERGMAN RELAY TEAM A", email: "team@example.com", mobile: "9876543210",
+      registrationId: "REG-1501", relayTeamSize: "3", relayMemberRole: "Cycling", bloodGroup: "B+",
+    });
+    expect(printElementText({ ...base, kind: "RELAY_TEAM_NAME" }, participant)).toBe("BERGMAN RELAY TEAM A");
+    expect(printElementText({ ...base, kind: "EMAIL_ADDRESS" }, participant)).toBe("team@example.com");
+    expect(printElementText({ ...base, kind: "REGISTRATION_ID" }, participant)).toBe("REG-1501");
+    expect(printElementText({ ...base, kind: "RELAY_MEMBER_ROLE" }, participant)).toBe("Cycling");
+    expect(printElementText({ ...base, kind: "BLOOD_GROUP" }, participant)).toBe("B+");
   });
   it("prints shape layers and preserves bold weight, text alignment, and line spacing", () => {
     const template = defaultPrintTemplate("event-1", "olympic", "BIB");

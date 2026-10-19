@@ -119,19 +119,54 @@ export async function saveAthleteTrackingVisibility(
   uid: string,
   email: string | null,
   trackingVisibility: "PUBLIC" | "ANONYMOUS",
+  identityName?: string | null,
 ): Promise<AthleteProfile> {
   const current = await getAthleteProfile(uid);
-  if (!current) {
-    throw new Error("Complete the athlete profile before changing live tracking visibility.");
+  if (current) {
+    return saveAthleteProfile(uid, email, {
+      name: current.name,
+      phoneCountryCode: current.phoneCountryCode,
+      mobileNumber: current.mobileNumber,
+      country: current.country,
+      state: current.state,
+      city: current.city,
+      photoUrl: current.photoUrl,
+      trackingVisibility,
+    });
   }
-  return saveAthleteProfile(uid, email, {
-    name: current.name,
-    phoneCountryCode: current.phoneCountryCode,
-    mobileNumber: current.mobileNumber,
-    country: current.country,
-    state: current.state,
-    city: current.city,
-    photoUrl: current.photoUrl,
+
+  // Imported and OTP-linked athletes can own registrations before they have
+  // completed the optional account profile. Live-tracking privacy is an
+  // account preference and must remain writable for those athletes as well.
+  // Store a profile shell that preserves the preference; the normal profile
+  // form will replace the empty optional details when it is completed.
+  const normalizedEmail = email?.trim().toLowerCase() || null;
+  const profile: AthleteProfile = {
+    uid,
+    email: normalizedEmail,
+    name: identityName?.trim() || normalizedEmail?.split("@")[0] || "Athlete",
+    phoneCountryCode: "",
+    mobileNumber: "",
+    country: "",
+    state: "",
+    city: "",
+    photoUrl: "",
     trackingVisibility,
+    updatedAt: new Date().toISOString(),
+  };
+  const kv = await getKv();
+  const storedUserIndex = await kv.get<unknown[]>("raceupshot:users:index", "json");
+  const userIndex = Array.isArray(storedUserIndex) ? storedUserIndex : [];
+  const isIndexed = userIndex.some((item) => {
+    if (typeof item === "string") return item === uid;
+    if (!item || typeof item !== "object") return false;
+    const row = item as { uid?: unknown; userId?: unknown; id?: unknown };
+    return [row.uid, row.userId, row.id].some((value) => value === uid);
   });
+  await Promise.all([
+    kv.put(`${PROFILE_PREFIX}${uid}`, JSON.stringify(profile)),
+    ...(normalizedEmail ? [kv.put(`${PROFILE_EMAIL_PREFIX}${normalizedEmail}`, uid)] : []),
+    ...(!isIndexed ? [kv.put("raceupshot:users:index", JSON.stringify([...userIndex, uid]))] : []),
+  ]);
+  return profile;
 }

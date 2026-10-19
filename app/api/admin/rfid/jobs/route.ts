@@ -5,10 +5,8 @@ import { getAuthenticatedAdminEmail } from "@/lib/admin-auth";
 import { createRfidDraftJob } from "@/lib/rfid-encoder-repository";
 
 const schema = z.object({
-  name: z.string().trim().max(120).default(""), prefix: z.string().trim().max(64),
-  startingSequence: z.string().trim().min(1).max(64), digits: z.number().int().min(1).max(64),
-  increment: z.number().int().min(1).max(1_000_000), total: z.number().int().min(1).max(10_000),
-  epcLength: z.number().int().min(2).max(128),
+  name: z.string().trim().max(120).default(""), epcProfileId: z.string().trim().min(1).max(100),
+  startingChipNumber: z.string().trim().regex(/^\d+$/).max(64), total: z.number().int().min(1).max(10_000),
 });
 
 export async function POST(request: Request) {

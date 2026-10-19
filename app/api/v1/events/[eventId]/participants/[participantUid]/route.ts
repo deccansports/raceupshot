@@ -1,4 +1,5 @@
 import { platformFailure, platformSuccess } from "@/lib/platform-api-response";
+import { configuredCourseDistance } from '@/lib/course-distance';
 import { participantViewerFromRequest } from "@/lib/participant-viewer";
 import { getCanonicalLiveEvent } from "@/lib/canonical-live-tracking";
 import { getPlatformEvent, getPublicLiveParticipant, getPublicResultParticipant } from "@/lib/platform-repository";
@@ -93,7 +94,12 @@ export async function GET(
       ?? [];
     return platformSuccess({
       ...participant,
-      timingConfiguration,
+      timingConfiguration: timingConfiguration ? {
+        ...timingConfiguration,
+        legs: contestLegs,
+        splits: contestSplits,
+        totalDistanceKm: configuredCourseDistance(contestSplits, contestLegs),
+      } : null,
       contestContext: timingConfiguration ? {
         contest: {
           id: contestId,

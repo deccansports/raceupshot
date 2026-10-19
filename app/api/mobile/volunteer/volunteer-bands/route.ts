@@ -7,7 +7,7 @@ import { z } from "@/lib/zod";
 const assignSchema = z.object({
   eventId: z.string().trim().min(1).max(160),
   volunteerId: z.string().trim().min(1).max(250),
-  bandCode: z.string().trim().min(2).max(64),
+  bandCode: z.string().trim().min(1).max(250),
 });
 
 export const dynamic = "force-dynamic";

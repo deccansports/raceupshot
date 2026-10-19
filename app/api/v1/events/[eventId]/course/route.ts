@@ -12,6 +12,9 @@ export async function GET(request: Request, { params }: { params: Promise<{ even
       getEventCourse(eventId, {
         surface: search.get("surface") === "mobile" ? "mobile" : "web",
         category: search.get("category"),
+        ticketId: search.get("ticketId"),
+        contestId: search.get("contestId"),
+        includeGeometry: search.get("geometry") !== "0",
       }),
       getPublicLiveTimingConfiguration(eventId).catch(() => null),
     ]);

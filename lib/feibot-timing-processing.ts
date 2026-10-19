@@ -17,6 +17,7 @@ import { applyParticipantChipAssignments } from "./participant-chip-assignments"
 import { getLiveTrackingHubConfig, normalizeFinalRaceSplits } from "./live-tracking-hub-config";
 import { getEventBySlug } from "./raceupshot-repository";
 import type { EventTicketDefinition } from "./event-ticket-definition";
+import { dispatchMobileTimingNotifications } from "./mobile-timing-push";
 
 const PREFIX = "raceupshot:timing-engine";
 
@@ -320,13 +321,27 @@ export async function storeFeibotProcessedTimingAudits(input: {
       sequence,
     };
     const existing = await kv.get<AthleteTimingAudit>(auditKey(input.providerEventUuid, contestUuid, participant.participantUid), "json");
-    const computedAudit = processFeibotAthleteTiming({
-      configuration,
-      rawReads: [],
-      participantIdentity: { participantUuid: participant.participantUid, bib: participant.bib, chipCode },
-      manualOverrides: existing?.manualOverrides ?? [],
-      feibotProcessedResults: processedResults,
-    });
+    const prefix = athletePrefix(input.providerEventUuid, contestUuid, participant.participantUid);
+    // Retain the provider's unmodified values separately from admin corrections.
+    await kv.put(`${prefix}:provider-review`, JSON.stringify({ eventId: input.eventId, configuration, processedResults, receivedAt: new Date().toISOString() }));
+    const savedOverrides = await listValues<ManualTimingOverride>(kv, `${prefix}:override:`);
+    const overrides = new Map((existing?.manualOverrides ?? []).map((entry) => [entry.overrideId, entry]));
+    for (const entry of savedOverrides) overrides.set(entry.overrideId, entry);
+    let computedAudit: AthleteTimingAudit;
+    try {
+      computedAudit = processFeibotAthleteTiming({
+        configuration, rawReads: [],
+        participantIdentity: { participantUuid: participant.participantUid, bib: participant.bib, chipCode },
+        manualOverrides: [...overrides.values()], feibotProcessedResults: processedResults,
+      });
+    } catch (error) {
+      if (!overrides.size || !existing) throw error;
+      // Preserve this athlete's last corrected state while retaining the new
+      // provider values for review; other athletes can still update.
+      await kv.put(`${prefix}:correction-conflict`, JSON.stringify(error instanceof Error ? error.message : 'Provider readings conflict with manual corrections.'));
+      continue;
+    }
+    if (overrides.size) await kv.delete(`${prefix}:correction-conflict`);
     const audit = enforceConfiguredCutoffs({
       audit: computedAudit,
       previousAudit: existing,
@@ -337,13 +352,23 @@ export async function storeFeibotProcessedTimingAudits(input: {
       waveStartTime: indexed?.waveStartTime,
     });
     if (JSON.stringify(existing) === JSON.stringify(audit)) continue;
-    const prefix = athletePrefix(input.providerEventUuid, contestUuid, participant.participantUid);
     await Promise.all([
       kv.put(auditKey(input.providerEventUuid, contestUuid, participant.participantUid), JSON.stringify(audit)),
       kv.put(`${prefix}:official`, JSON.stringify(audit.officialResults)),
       kv.put(`${prefix}:passages`, JSON.stringify(audit.passages)),
       kv.put(`${prefix}:decisions`, JSON.stringify(audit.decisions)),
     ]);
+    try {
+      await dispatchMobileTimingNotifications({
+        kv,
+        eventId: input.eventId,
+        previousAudit: existing,
+        audit,
+      });
+    } catch (error) {
+      // A push-provider outage must never block official timing ingestion.
+      console.warn("[push] split notification delivery failed", error);
+    }
     stored += 1;
   }
   return stored;
@@ -494,6 +519,16 @@ export async function processAndStoreTimingBatch(input: {
       kv.put(`${prefix}:passages`, JSON.stringify(audit.passages)),
       kv.put(`${prefix}:decisions`, JSON.stringify(audit.decisions)),
     ]);
+    try {
+      await dispatchMobileTimingNotifications({
+        kv,
+        eventId: input.eventId,
+        previousAudit,
+        audit,
+      });
+    } catch (error) {
+      console.warn("[push] direct-read notification delivery failed", error);
+    }
     audits.push(audit);
   }
   const auditByParticipant = new Map(audits.map((audit) => [audit.participantUuid, audit]));
@@ -726,6 +761,16 @@ export async function reevaluateEventTimingCutoffs(input: {
     });
     if (previousState === nextState) continue;
     await kv.put(auditKey(next.eventUuid, next.contestUuid, next.participantUuid), JSON.stringify(next));
+    try {
+      await dispatchMobileTimingNotifications({
+        kv,
+        eventId: input.eventId,
+        previousAudit: audit,
+        audit: next,
+      });
+    } catch (error) {
+      console.warn("[push] cutoff notification delivery failed", error);
+    }
     changedAudits.push(next);
   }
   if (!changedAudits.length) return { checked: eligible.length, changed: 0, published: false };

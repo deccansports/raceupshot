@@ -11,6 +11,9 @@ const inputSchema = z.object({
   helmetChecked: z.boolean().optional(),
   bikeRack: z.string().trim().max(80).optional(),
   lockerNumber: z.string().trim().max(80).optional(),
+  scannedChipCode: z.string().trim().max(500).optional(),
+  chipReturnMethod: z.enum(["CAMERA", "RFID", "MANUAL", "OVERRIDE", "NO_CHIP_ASSIGNED"]).optional(),
+  chipReturnReason: z.string().trim().max(250).optional(),
 });
 
 export const dynamic = "force-dynamic";

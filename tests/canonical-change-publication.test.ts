@@ -49,6 +49,26 @@ const base = {
 describe("canonical change publication ordering", () => {
   beforeEach(() => { state.values.clear(); state.operations.length = 0; state.messages.length = 0; });
 
+  it("persists split ranks for active athletes and republishes competitors after a faster read", async () => {
+    const athlete = (id: string, bib: string, time: string) => ({
+      ...base, participantUid: id, participantUuid: id, providerParticipantUuid: id, bib,
+      status: "STARTED", raceStatus: "STARTED",
+      splits: [{ splitId: "bike-20k", name: "Bike 20k", cumulativeTime: time, status: "PROVISIONAL" }],
+    });
+    await buildAndPublishCanonicalEventVersion({
+      eventId: "event-1", provider: "FEIBOT", providerEventUuid: "feibot-1",
+      rows: [athlete("participant-1", "1001", "00:50:00"), athlete("participant-2", "1002", "00:55:00")],
+    });
+    expect((await getCanonicalLiveParticipant("event-1", "participant-1"))?.participant.splits[0].rankAtSplit).toBe(1);
+    expect((await getCanonicalLiveParticipant("event-1", "participant-2"))?.participant.splits[0].rankAtSplit).toBe(2);
+    await publishIncrementalCanonicalParticipants({
+      eventId: "event-1", providerEventUuid: "feibot-1", reason: "split_updated",
+      rows: [athlete("participant-2", "1002", "00:45:00")],
+    });
+    expect((await getCanonicalLiveParticipant("event-1", "participant-1"))?.participant.splits[0].rankAtSplit).toBe(2);
+    expect((await getCanonicalLiveParticipant("event-1", "participant-2"))?.participant.splits[0].rankAtSplit).toBe(1);
+  });
+
   it("publishes registered Feibot athletes in the canonical index without placing them on the live leaderboard", async () => {
     const manifest = await buildAndPublishCanonicalEventVersion({
       eventId: "event-1",

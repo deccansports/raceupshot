@@ -1,6 +1,8 @@
 import { z } from './zod';
 
 export const eventTicketLegTypes = ['SWIM', 'BIKE', 'RUN', 'TRANSITION', 'OTHER'] as const;
+export const eventTicketDisciplines = ['SWIM', 'BIKE', 'RUN'] as const;
+export type EventTicketDiscipline = typeof eventTicketDisciplines[number];
 
 export const eventTicketLegSchema = z.object({
   id: z.string().trim().min(1).max(120),
@@ -34,6 +36,7 @@ export const eventTicketDefinitionSchema = z.object({
   scheduledStartAt: z.string().trim().max(80),
   totalDistanceKm: z.number().min(0).max(10_000).nullable(),
   overallCutoffSeconds: z.number().int().min(0).max(60 * 60 * 72).nullable(),
+  enabledDisciplines: z.array(z.enum(eventTicketDisciplines)).max(3).optional(),
   legs: z.array(eventTicketLegSchema).max(30),
   splits: z.array(eventTicketSplitSchema).max(150),
 }).superRefine((ticket, ctx) => {
@@ -64,9 +67,15 @@ export function legacyTicketDefinition(name: string, index = 0): EventTicketDefi
     scheduledStartAt: '',
     totalDistanceKm: null,
     overallCutoffSeconds: null,
+    enabledDisciplines: [],
     legs: [],
     splits: [],
   };
+}
+
+export function resolvedTicketDisciplines(ticket: Pick<EventTicketDefinition, 'enabledDisciplines' | 'legs'>): EventTicketDiscipline[] {
+  const source = ticket.enabledDisciplines ?? ticket.legs.map((leg) => leg.type);
+  return eventTicketDisciplines.filter((discipline) => source.includes(discipline));
 }
 
 export function eventTicketDefinitions(value: unknown, categories: string[] = []): EventTicketDefinition[] {

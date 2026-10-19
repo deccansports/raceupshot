@@ -32,3 +32,7 @@ export function eventWaiverPolicy(value: unknown): EventWaiverPolicy {
   const parsed = eventWaiverPolicySchema.safeParse(value);
   return parsed.success ? parsed.data : defaultEventWaiverPolicy;
 }
+
+export function eventHasWaiverIntent(event: { waiverHtml?: string | null; waiverVersion?: string | null } | null | undefined): boolean {
+  return Boolean(event?.waiverHtml?.trim() || event?.waiverVersion?.trim());
+}

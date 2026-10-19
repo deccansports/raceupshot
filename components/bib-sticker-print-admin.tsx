@@ -1,4 +1,6 @@
 "use client";
+
+import { BIB_PRINT_FONT_CSS, MONTSERRAT_EXTRABOLD } from "@/lib/bib-print-fonts";
 /* eslint-disable @next/next/no-img-element -- print-template artwork is an admin-uploaded data URL, not a Next image asset. */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -6,7 +8,7 @@ import type { RaceEvent } from "@/lib/types";
 import { bibPrintCategoryOptions } from "@/lib/bib-print-category-options";
 import { downloadPrintDocumentPdf } from "@/lib/bib-print-pdf";
 import { fitTextBoxToContent, printPreviewScale } from "@/lib/bib-print-preview";
-import { fixedPrintLayout, matchesPrintGender, PRINT_FONT_FAMILIES, printElementText, selectPrintParticipants, type PrintElementKind, type PrintParticipant, type PrintTemplate, type PrintTemplateElement } from "@/lib/bib-print-layout";
+import { fixedPrintLayout, matchesPrintGender, PRINT_DATA_ELEMENT_KINDS, PRINT_FONT_FAMILIES, printElementText, selectPrintParticipants, type PrintElementKind, type PrintParticipant, type PrintTemplate, type PrintTemplateElement } from "@/lib/bib-print-layout";
 
 type Audit = {
   id?: string; participantId: string; bibNumber?: string; categoryId?: string;
@@ -16,16 +18,23 @@ type Audit = {
 type PrintData = { event: { id: string; name: string }; participants: PrintParticipant[]; templates: PrintTemplate[]; audits: Audit[] };
 type Mode = "ALL" | "RANGE" | "SELECTED" | "NOT_PRINTED" | "REPRINT";
 type PrintBatch = { templateId: string; mode: Mode; selectedIds: string[]; minBib: string; maxBib: string; templateSnapshot?: PrintTemplate };
-const fields: PrintElementKind[] = ["BIB_NUMBER", "PARTICIPANT_NAME", "FIRST_NAME", "LAST_NAME", "RACE_CATEGORY", "SUBCATEGORY", "GENDER", "AGE_GROUP", "GENDER_AGE_GROUP", "CLUB_NAME", "COUNTRY_FLAG", "TSHIRT_SIZE", "EMERGENCY_CONTACT", "TIMING_CHIP", "ATHLETE_BAND_CODE", "PARTICIPANT_QR", "ATHLETE_BAND_QR", "BARCODE", "STATIC_TEXT", "STATIC_IMAGE"];
+const fields: PrintElementKind[] = [...PRINT_DATA_ELEMENT_KINDS, "STATIC_TEXT", "STATIC_IMAGE"];
 const shapes: PrintElementKind[] = ["RECTANGLE", "ELLIPSE", "LINE"];
 const bibShortcuts: ReadonlyArray<readonly [PrintElementKind, string]> = [
-  ["BIB_NUMBER", "BIB"], ["PARTICIPANT_NAME", "Name"], ["CLUB_NAME", "Club Name"],
+  ["BIB_NUMBER", "BIB"], ["PARTICIPANT_NAME", "Name"], ["RELAY_TEAM_NAME", "Team Name"], ["CLUB_NAME", "Club Name"],
   ["TSHIRT_SIZE", "T-Shirt Size"], ["EMERGENCY_CONTACT", "Emergency Contact Number"],
   ["GENDER_AGE_GROUP", "Gender + Age Group"], ["COUNTRY_FLAG", "Country Flag"],
   ["ATHLETE_BAND_QR", "Athlete Band QR"],
 ];
 const fontWeights = [[400, "Regular"], [500, "Medium"], [600, "Semi bold"], [700, "Bold"], [800, "Extra bold"], [900, "Black"]] as const;
-const label = (kind: string) => kind.replaceAll("_", " ").toLowerCase().replace(/^./, (char) => char.toUpperCase());
+const fieldLabels: Partial<Record<PrintElementKind, string>> = {
+  BIB_NUMBER: "BIB number", PARTICIPANT_ID: "Participant ID", REGISTRATION_ID: "Registration ID",
+  RELAY_TEAM_NAME: "Relay team name", RELAY_TEAM_SIZE: "Relay team size", RELAY_MEMBER_NUMBER: "Relay member number",
+  RELAY_MEMBER_ROLE: "Relay member role", SESSION_ID: "Session ID", DATE_OF_BIRTH: "Date of birth (DOB)",
+  TSHIRT_SIZE: "T-shirt size", COUNTRY_FLAG: "Country flag", BEL_SEASON: "BEL season", BEL_RECOGNITION: "BEL recognition",
+  PARTICIPANT_QR: "Participant QR", ATHLETE_BAND_QR: "Athlete band QR", IDENTITY_PROOF: "Identity proof",
+};
+const label = (kind: string) => fieldLabels[kind as PrintElementKind] ?? kind.replaceAll("_", " ").toLowerCase().replace(/^./, (char) => char.toUpperCase());
 const responseError = async (response: Response, fallback: string): Promise<Error> => {
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
   if (contentType.includes("application/json")) {
@@ -104,6 +113,7 @@ export function BibStickerPrintAdmin({ events }: { events: RaceEvent[] }) {
   const persistedTemplate = template ? data?.templates.find((item) => item.id === template.id) : null;
   const templateNeedsSave = Boolean(template && (!persistedTemplate || JSON.stringify(persistedTemplate) !== JSON.stringify(template)));
   const canGenerate = Boolean(template && data && selected.length > 0 && !busy);
+  const canPreview = Boolean(template && data && example && !busy);
 
   const post = async <T,>(body: unknown): Promise<T> => responseData<T>(await fetch(endpoint, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
   const updateTemplate = (changes: Partial<PrintTemplate>) => setTemplate((current) => current ? { ...current, ...changes } : current);
@@ -178,13 +188,16 @@ export function BibStickerPrintAdmin({ events }: { events: RaceEvent[] }) {
   });
   const makePdf = (purpose: "preview" | "download" | "print", forceFourUp = false) => void run("Creating PDF…", async () => {
     if (!template || !data) throw new Error("Choose a template first.");
-    if (!selected.length) throw new Error(selectionError || "Select at least one participant.");
+    if (purpose === "preview" && !example) throw new Error("Choose a participant to preview.");
+    if (purpose !== "preview" && !selected.length) throw new Error(selectionError || "Select at least one participant.");
     const popup = purpose === "download" ? null : window.open("", "_blank");
     if (purpose !== "download" && !popup) throw new Error("Popup blocked. Allow popups to preview or print the PDF.");
     try {
       const outputTemplate = await persistTemplateForOutput();
-      const targetBatch: PrintBatch = { templateId: outputTemplate.id, mode, selectedIds, minBib, maxBib, templateSnapshot: outputTemplate };
-      const targetSelected = selectPrintParticipants({ roster: data.participants, eventId: data.event.id, ticketId: outputTemplate.ticketId, subcategoryId: outputTemplate.subcategoryId, mode, selectedIds, minBib, maxBib, previouslyPrintedIds: printed }).filter((row) => matchesPrintGender(row.gender, outputTemplate.genderScope));
+      const targetBatch: PrintBatch = purpose === "preview"
+        ? { templateId: outputTemplate.id, mode: "SELECTED", selectedIds: [example!.participantId], minBib: "", maxBib: "", templateSnapshot: outputTemplate }
+        : { templateId: outputTemplate.id, mode, selectedIds, minBib, maxBib, templateSnapshot: outputTemplate };
+      const targetSelected = selectPrintParticipants({ roster: data.participants, eventId: data.event.id, ticketId: outputTemplate.ticketId, subcategoryId: outputTemplate.subcategoryId, mode: targetBatch.mode, selectedIds: targetBatch.selectedIds, minBib: targetBatch.minBib, maxBib: targetBatch.maxBib, previouslyPrintedIds: printed }).filter((row) => matchesPrintGender(row.gender, outputTemplate.genderScope));
       const response = await fetch(endpoint, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: forceFourUp ? "four-up-print" : "print", batch: targetBatch }) });
       if (!response.ok) throw await responseError(response, "Print preparation failed");
       const html = await response.text();
@@ -282,6 +295,7 @@ export function BibStickerPrintAdmin({ events }: { events: RaceEvent[] }) {
   };
 
   return <div className="bib-print-admin">
+    <style>{BIB_PRINT_FONT_CSS}</style>
     <section className="admin-card"><div className="admin-card-head"><div><h2>BIB & Sticker Print</h2><p>Design event-scoped templates, create print-ready PDFs, and record completed physical prints.</p></div></div>
       {error && <div className="error-banner" role="alert">{error}</div>}{success && <div className="success-banner" role="status">{success}</div>}
       <div className="bib-print-type-tabs" role="tablist" aria-label="Print type">
@@ -315,7 +329,7 @@ export function BibStickerPrintAdmin({ events }: { events: RaceEvent[] }) {
         {selectedElement && <><h4>{label(selectedElement.kind)}</h4><div className="bib-print-element-controls">{numeric(selectedElement, "x", -100, 100)}{numeric(selectedElement, "y", -100, 100)}{numeric(selectedElement, "width", 1, 100)}{numeric(selectedElement, "height", 1, 100)}{numeric(selectedElement, "rotation", -360, 360)}
           {shapes.includes(selectedElement.kind) ? <><label>Fill color<input type="color" value={selectedElement.fillColor ?? "#ffffff"} onChange={(event) => updateElement(selectedElement.id, { fillColor: event.target.value })} /></label><label>Outline color<input type="color" value={selectedElement.strokeColor ?? "#111827"} onChange={(event) => updateElement(selectedElement.id, { strokeColor: event.target.value })} /></label>{numeric(selectedElement, "strokeWidth", 0, 30)}{selectedElement.kind === "RECTANGLE" && numeric(selectedElement, "cornerRadius", 0, 100)}</> : <>
           {numeric(selectedElement, "fontSize", 1, 600)}<label>Font weight<select value={selectedElement.fontWeight} onChange={(event) => updateElement(selectedElement.id, { fontWeight: Number(event.target.value) })}>{!fontWeights.some(([weight]) => weight === selectedElement.fontWeight) && <option value={selectedElement.fontWeight}>{selectedElement.fontWeight} · Custom</option>}{fontWeights.map(([weight, name]) => <option key={weight} value={weight}>{name} · {weight}</option>)}</select></label>{numeric(selectedElement, "letterSpacing", -30, 30)}{numeric(selectedElement, "lineHeight", 0.5, 3, 0.05)}
-          <label>Font<select value={selectedElement.fontFamily} onChange={(event) => updateElement(selectedElement.id, { fontFamily: event.target.value })}>{PRINT_FONT_FAMILIES.map((font) => <option key={font} value={font}>{font.startsWith("\"Monument Extended") ? "Monument Extended" : font.startsWith("\"PF Monumenta Pro") ? "Monumenta Pro" : font.split(",")[0]}</option>)}</select></label><label>Color<input type="color" value={selectedElement.color} onChange={(event) => updateElement(selectedElement.id, { color: event.target.value })} /></label>
+          <label>Font<select value={selectedElement.fontFamily} onChange={(event) => updateElement(selectedElement.id, { fontFamily: event.target.value, ...(event.target.value === MONTSERRAT_EXTRABOLD ? { fontWeight: 800 } : {}) })}>{PRINT_FONT_FAMILIES.map((font) => <option key={font} value={font}>{font === MONTSERRAT_EXTRABOLD ? "Montserrat ExtraBold" : font.startsWith("\"Monument Extended") ? "Monument Extended" : font.startsWith("\"PF Monumenta Pro") ? "Monumenta Pro" : font.split(",")[0]}</option>)}</select></label><label>Color<input type="color" value={selectedElement.color} onChange={(event) => updateElement(selectedElement.id, { color: event.target.value })} /></label>
           <label>Text case<select value={selectedElement.textCase} onChange={(event) => updateElement(selectedElement.id, { textCase: event.target.value as PrintTemplateElement["textCase"] })}><option>NONE</option><option>UPPER</option><option>LOWER</option></select></label>
           <label>Horizontal<select value={selectedElement.align} onChange={(event) => updateElement(selectedElement.id, { align: event.target.value as PrintTemplateElement["align"] })}><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select></label><label>Vertical<select value={selectedElement.verticalAlign} onChange={(event) => updateElement(selectedElement.id, { verticalAlign: event.target.value as PrintTemplateElement["verticalAlign"] })}><option value="top">Top</option><option value="middle">Middle</option><option value="bottom">Bottom</option></select></label>
           <label><input type="checkbox" checked={selectedElement.italic} onChange={(event) => updateElement(selectedElement.id, { italic: event.target.checked })} /> Italic</label><label><input type="checkbox" checked={selectedElement.underline} onChange={(event) => updateElement(selectedElement.id, { underline: event.target.checked })} /> Underline</label></>}
@@ -326,11 +340,11 @@ export function BibStickerPrintAdmin({ events }: { events: RaceEvent[] }) {
         <div className="bib-print-align-panel"><strong>Edge Spacing (%)</strong><div className="bib-print-element-controls">{(["left", "right", "top", "bottom"] as const).map((edge) => <label key={edge}>{label(edge)}<input type="number" step="0.1" min="0" max="99" value={Number((edge === "left" ? selectedElement.x : edge === "right" ? 100 - selectedElement.x - selectedElement.width : edge === "top" ? selectedElement.y : 100 - selectedElement.y - selectedElement.height).toFixed(1))} onChange={(event) => setEdgeSpacing(edge, Number(event.target.value))} /></label>)}</div></div>
         <div className="bib-print-shape-actions"><button className="button" onClick={() => { const copy = { ...selectedElement, id: crypto.randomUUID(), x: Math.min(100 - selectedElement.width, selectedElement.x + 4), y: Math.min(100 - selectedElement.height, selectedElement.y + 4) }; updateTemplate({ elements: [...template.elements, copy] }); setSelectedElementId(copy.id); }}>Duplicate</button><button className="button" onClick={() => updateTemplate({ elements: [...template.elements.filter((item) => item.id !== selectedElement.id), selectedElement] })}>Bring to front</button><button className="button" onClick={() => updateTemplate({ elements: [selectedElement, ...template.elements.filter((item) => item.id !== selectedElement.id)] })}>Send to back</button></div><button className="button" onClick={() => { updateTemplate({ elements: template.elements.filter((item) => item.id !== selectedElement.id) }); setSelectedElementId(""); }}>Remove element</button></>}
       </div></div>
-      <div className="bib-print-preview-nav"><button type="button" className="button" disabled={previewIndex <= 0} onClick={() => setPreviewIndex((index) => Math.max(0, index - 1))}>Previous participant</button><label>Preview participant<select value={example?.participantId ?? ""} onChange={(event) => setPreviewIndex(Math.max(0, visibleRows.findIndex((row) => row.participantId === event.target.value)))}><option value="">No participants</option>{visibleRows.map((row) => <option key={row.participantId} value={row.participantId}>{row.bibNumber} · {row.name}</option>)}</select></label>{type === "BIB" && <button type="button" className="button" disabled={!example || !!busy} onClick={downloadSingleBib}>Download single A5 BIB PDF</button>}<button type="button" className="button" disabled={!visibleRows.length || previewIndex >= visibleRows.length - 1} onClick={() => setPreviewIndex((index) => Math.min(visibleRows.length - 1, index + 1))}>Next participant</button></div>
+      <div className="bib-print-preview-nav"><button type="button" className="button" disabled={previewIndex <= 0} onClick={() => setPreviewIndex((index) => Math.max(0, index - 1))}>Previous participant</button><label>Preview participant<select value={example?.participantId ?? ""} onChange={(event) => setPreviewIndex(Math.max(0, visibleRows.findIndex((row) => row.participantId === event.target.value)))}><option value="">No participants</option>{visibleRows.map((row) => <option key={row.participantId} value={row.participantId}>{row.bibNumber} · {row.relayTeamName ? `${row.relayTeamName} · ` : ""}{row.name}</option>)}</select></label>{type === "BIB" && <button type="button" className="button" disabled={!example || !!busy} onClick={downloadSingleBib}>Download single A5 BIB PDF</button>}<button type="button" className="button" disabled={!visibleRows.length || previewIndex >= visibleRows.length - 1} onClick={() => setPreviewIndex((index) => Math.min(visibleRows.length - 1, index + 1))}>Next participant</button></div>
     </section>}
     {template && <section className="admin-card"><h3>Batch print</h3><div className="bib-print-controls"><label>Selection mode<select value={mode} onChange={(event) => { setMode(event.target.value as Mode); setDownloaded(false); }}><option value="ALL">All active participants</option><option value="RANGE">Numeric BIB range</option><option value="SELECTED">Selected participants</option><option value="NOT_PRINTED">Not previously printed (select checkboxes)</option><option value="REPRINT">Previously printed / reprint (select checkboxes)</option></select></label>{mode === "RANGE" && <><label>From BIB<input value={minBib} onChange={(event) => setMinBib(event.target.value)} /></label><label>To BIB<input value={maxBib} onChange={(event) => setMaxBib(event.target.value)} /></label></>}</div>
       <div className="bib-print-selection-bar"><span>{selectedIds.length} selected</span><button className="button" type="button" onClick={() => setSelectedIds(selectableRows.map((row) => row.participantId))}>Select all shown</button><button className="button" type="button" onClick={() => setSelectedIds([])}>Clear</button></div>
-      <div className="bib-print-roster"><table><thead><tr><th>Select</th><th>BIB</th><th>Athlete</th><th>Category</th><th>Gender</th><th>Print history</th></tr></thead><tbody>{selectableRows.map((row) => <tr key={row.participantId}><td><input type="checkbox" checked={selectedIds.includes(row.participantId)} onChange={(event) => setSelectedIds((current) => event.target.checked ? [...new Set([...current, row.participantId])] : current.filter((id) => id !== row.participantId))} /></td><td>{row.bibNumber}</td><td>{row.name}</td><td>{row.ticketName}</td><td>{row.gender}</td><td>{printed.has(row.participantId) ? "Printed" : "Not printed"}</td></tr>)}</tbody></table></div>
+      <div className="bib-print-roster"><table><thead><tr><th>Select</th><th>BIB</th><th>Team</th><th>Athlete</th><th>Category</th><th>Gender</th><th>Print history</th></tr></thead><tbody>{selectableRows.map((row) => <tr key={row.participantId}><td><input type="checkbox" checked={selectedIds.includes(row.participantId)} onChange={(event) => setSelectedIds((current) => event.target.checked ? [...new Set([...current, row.participantId])] : current.filter((id) => id !== row.participantId))} /></td><td>{row.bibNumber}</td><td>{row.relayTeamName || "—"}</td><td>{row.name}</td><td>{row.ticketName}</td><td>{row.gender}</td><td>{printed.has(row.participantId) ? "Printed" : "Not printed"}</td></tr>)}</tbody></table></div>
       <div className="bib-print-summary"><span>Participants <strong>{selected.length}</strong></span><span>{type === "BIB" ? "BIBs" : "Stickers"} <strong>{selected.length}</strong></span><span>Paper <strong>{template.paperPreset === "12X18" ? "18 × 12 in Landscape" : template.paperPreset === "A4_SINGLE_A5" ? "A4 · 1 centred A5" : template.paperPreset === "A4" ? "A4 · 2 BIBs" : template.paperPreset === "STICKER_4X2" ? "4 × 2 in" : "A5 Portrait"}</strong></span><span>{type === "BIB" ? "BIBs" : "Stickers"} per page <strong>{layout?.itemsPerPage}</strong></span><span>Physical pages <strong>{pages}</strong></span></div>
       {template.paperPreset === "12X18" && <p className="bib-print-note">Four landscape A5 BIBs are aligned to the 18 × 12 inch sheet’s top-left in a 2 × 2 grid. Unused space remains on the right and bottom. Print at 100% / Actual Size with no scaling.</p>}
       {template.paperPreset === "A5" && <p className="bib-print-note">The full-size landscape A5 BIB is rotated onto one portrait A5 printer sheet without scaling.</p>}
@@ -338,7 +352,7 @@ export function BibStickerPrintAdmin({ events }: { events: RaceEvent[] }) {
       {template.paperPreset === "A4" && <p className="bib-print-note">Two BIBs are arranged vertically on portrait A4 paper with a cut guide.</p>}
       {templateNeedsSave && <p className="bib-print-note">Pending template edits will be saved automatically when you preview, download, or print.</p>}
       {selectionError && <p className="error-banner">{selectionError}</p>}
-      <div className="bib-print-actions" aria-busy={!!busy}><button type="button" className="button" disabled={!canGenerate} onClick={() => makePdf("preview")}>Preview</button>{type === "BIB" && <button type="button" className="button" disabled={!canGenerate} onClick={() => makePdf("download", true)}>Download 18×12 · 4 A5 BIBs</button>}<button type="button" className="button button-primary" disabled={!canGenerate} onClick={() => makePdf("download")}>Download Flattened PDF</button><button type="button" className="button" disabled={!canGenerate} onClick={() => makePdf("print")}>Print</button></div>
+      <div className="bib-print-actions" aria-busy={!!busy}><button type="button" className="button" disabled={!canPreview} onClick={() => makePdf("preview")}>Preview current participant</button>{type === "BIB" && <button type="button" className="button" disabled={!canGenerate} onClick={() => makePdf("download", true)}>Download 18×12 · 4 A5 BIBs</button>}<button type="button" className="button button-primary" disabled={!canGenerate} onClick={() => makePdf("download")}>Download Flattened PDF</button><button type="button" className="button" disabled={!canGenerate} onClick={() => makePdf("print")}>Print</button></div>
       {busy && <p className="bib-print-note" role="status">{busy} Keep this tab open.</p>}
       {exportProgress && <p className="bib-print-note" role="status">{exportProgress}</p>}
       {downloaded && <div className="bib-print-confirm"><p>Only confirm after the physical paper has printed successfully. Downloading or previewing alone is not a print.</p>{selected.some((row) => printed.has(row.participantId)) && <label>Reprint reason<input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Why is this BIB being reprinted?" /></label>}<button className="button button-primary" disabled={!!busy} onClick={confirmPrinted}>Confirm printed & record audit</button></div>}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { eventInput } from '../lib/event-input';
-import { eventTicketDefinitionSchema, legacyTicketDefinition } from '../lib/event-ticket-definition';
+import { eventTicketDefinitionSchema, legacyTicketDefinition, resolvedTicketDisciplines, type EventTicketDefinition } from '../lib/event-ticket-definition';
 import { eventWriteRecord } from '../lib/raceupshot-repository';
 
 const baseEvent = {
@@ -31,5 +31,14 @@ describe('event ticket race flow', () => {
     const record = eventWriteRecord({ ...baseEvent, categories: [], ticketDefinitions: [ticket] });
     expect(record.categories).toEqual(['Half Marathon']);
     expect(record.ticketDefinitions).toEqual([ticket]);
+  });
+
+  it('stores admin-selected sport combinations per ticket', () => {
+    const swimRun: EventTicketDefinition = { ...legacyTicketDefinition('Aquathlon'), enabledDisciplines: ['SWIM', 'RUN'] };
+    const bikeRun: EventTicketDefinition = { ...legacyTicketDefinition('Duathlon'), enabledDisciplines: ['BIKE', 'RUN'] };
+    expect(eventTicketDefinitionSchema.safeParse(swimRun).success).toBe(true);
+    expect(eventTicketDefinitionSchema.safeParse(bikeRun).success).toBe(true);
+    expect(resolvedTicketDisciplines(swimRun)).toEqual(['SWIM', 'RUN']);
+    expect(resolvedTicketDisciplines(bikeRun)).toEqual(['BIKE', 'RUN']);
   });
 });

@@ -65,6 +65,14 @@ export type ParticipantState = {
   checkedInAt: string | null;
   bikeCheckedInAt: string | null;
   bikeCheckedOutAt: string | null;
+  assignedChipCodeAtCheckout: string | null;
+  returnedChipCode: string | null;
+  returnedChipFullEpc: string | null;
+  chipReturnStatus: 'PENDING_RETURN' | 'RETURNED' | 'NOT_RETURNED' | 'NO_CHIP_ASSIGNED';
+  chipReturnMethod: 'CAMERA' | 'RFID' | 'MANUAL' | 'OVERRIDE' | 'NO_CHIP_ASSIGNED' | null;
+  chipReturnReason: string | null;
+  chipReturnedAt: string | null;
+  bikeCheckoutTransactionId: string | null;
   helmetChecked: boolean;
   bikeRack: string | null;
   medalIssuedAt: string | null;
@@ -163,6 +171,12 @@ export type VolunteerOperationsOverviewLog = {
   capturedAt: string;
   status: string;
   bikeRack: string | null;
+  assignedChipCode?: string | null;
+  returnedChipCode?: string | null;
+  chipReturnStatus?: string | null;
+  chipReturnMethod?: string | null;
+  chipReturnReason?: string | null;
+  bikeCheckoutTransactionId?: string | null;
 };
 
 export type VolunteerOperationsOverview = {
@@ -180,6 +194,11 @@ export type VolunteerOperationsOverview = {
   remainingToAssign: number;
   chipsAssignedToBikeEntries: number;
   remainingToAssignFromBikeEntries: number;
+  chipsExpectedAtCheckout: number;
+  chipsReturnedAtCheckout: number;
+  chipsNotReturnedAtCheckout: number;
+  checkoutWithoutAssignedChip: number;
+  pendingChipReturns: number;
   checkInLogs: VolunteerOperationsOverviewLog[];
   bikeCheckInLogs: VolunteerOperationsOverviewLog[];
   bikeCheckOutLogs: VolunteerOperationsOverviewLog[];
@@ -187,12 +206,15 @@ export type VolunteerOperationsOverview = {
 };
 
 export type ManualTimingStamp = {
+  canReset?: boolean;
   id: string;
   bib: string;
   athleteName: string;
   timingPointName?: string;
   timingMode?: 'GUN' | 'TIMING_POINT';
   gunTime?: string | null;
+  elapsedTime?: string | null;
+  elapsedStartSource?: 'CHIP' | 'GUN' | null;
   capturedAt: string;
   status: string;
   overallRank?: number | null;

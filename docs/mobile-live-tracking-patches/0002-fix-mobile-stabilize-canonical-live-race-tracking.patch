@@ -1,0 +1,3605 @@
+From 36477620d0dcaca10f854c89f95b3bf7401badc0 Mon Sep 17 00:00:00 2001
+From: vaibhav6577 <vaibhav.belgaonkar@gmail.com>
+Date: Mon, 19 Oct 2026 21:51:27 +0530
+Subject: [PATCH 2/2] fix(mobile): stabilize canonical live race tracking
+
+---
+ src/core/auth/AuthProvider.tsx                |  15 +-
+ src/core/auth/accessToken.ts                  |  13 +
+ src/core/auth/authenticatedFetch.ts           |  44 +-
+ src/core/auth/firebase.ts                     |   6 +
+ src/core/auth/useAuth.ts                      |  52 +-
+ .../navigation/useNotificationDeepLinks.ts    |  10 +-
+ .../athlete-course-distance.test.ts           |  91 ++++
+ src/core/repositories/athlete.repository.ts   |  65 ++-
+ src/core/repositories/auth.repository.ts      |   6 +-
+ .../canonicalTracking.repository.ts           |   3 +-
+ .../course.repository.gpx-contract.test.ts    |  16 +
+ src/core/repositories/course.repository.ts    |  96 ++--
+ .../repositories/leaderboard.repository.ts    |   1 +
+ src/core/services/api/client.ts               |  16 +-
+ src/core/services/api/http.ts                 |  76 ++-
+ src/features/auth/components/LoginScreen.tsx  |  77 ++-
+ .../events/components/EventTrackScreen.tsx    |   2 +-
+ .../events/components/LiveTrackScreen.tsx     | 513 +++++++++++++-----
+ .../live-track-all-markers-contract.test.ts   |  38 ++
+ .../live-track-map-search.contract.test.ts    |  67 +++
+ .../components/AthleteDetailScreen.tsx        |   8 +-
+ .../components/cards/PredictionCard.tsx       |  75 ++-
+ .../components/cards/RaceProgressCard.tsx     |  29 +-
+ .../components/CourseMapView.native.tsx       | 113 +---
+ ...course-map-athlete-marker-contract.test.ts |  39 +-
+ .../course-map/courseConfig.points.test.ts    |  26 +
+ src/features/tracking/engine/geo.test.ts      |  30 +
+ src/features/tracking/engine/geo.ts           |  49 ++
+ .../hooks/useCanonicalChangeStream.test.ts    |  19 +
+ .../hooks/useCanonicalChangeStream.ts         |  15 +-
+ .../tracking/hooks/useTrackingQueries.ts      |  39 +-
+ .../components/LeaderboardScreen.tsx          |   2 +-
+ .../mappers.raceupshot-canonical.test.ts      |  54 ++
+ src/features/tracking/mappers.ts              |  33 +-
+ .../timing/compactRaceProgressTiming.test.ts  | 100 +++-
+ .../timing/compactRaceProgressTiming.ts       |  61 ++-
+ .../tracking/timing/freshness.test.ts         |  25 +
+ src/features/tracking/timing/freshness.ts     |  25 +-
+ src/features/tracking/timing/index.ts         |   1 +
+ .../tracking/timing/mapLegProgress.ts         |  31 ++
+ .../tracking/watchlist/hooks/useWatchlist.ts  |  88 ++-
+ src/shared/components/ui/BottomSheet.tsx      |  84 ++-
+ 42 files changed, 1720 insertions(+), 433 deletions(-)
+ create mode 100644 src/core/auth/accessToken.ts
+ create mode 100644 src/core/repositories/athlete-course-distance.test.ts
+ create mode 100644 src/features/events/components/live-track-map-search.contract.test.ts
+ create mode 100644 src/features/tracking/engine/geo.test.ts
+ create mode 100644 src/features/tracking/hooks/useCanonicalChangeStream.test.ts
+ create mode 100644 src/features/tracking/timing/mapLegProgress.ts
+
+diff --git a/src/core/auth/AuthProvider.tsx b/src/core/auth/AuthProvider.tsx
+index 760883c..15c8c54 100644
+--- a/src/core/auth/AuthProvider.tsx
++++ b/src/core/auth/AuthProvider.tsx
+@@ -7,8 +7,10 @@ import { resumePushRegistrationIfEnabled } from '@/core/services/notifications';
+ import { ProductionTrackingSubscriptionRepository } from '@/core/repositories/trackingSubscription.repository';
+ import { useWatchlistStore, type TrackedAthlete } from '@/core/store';
+ 
+-import { clearAccessToken, clearSessionMeta, getAccessToken, getSessionMeta } from './secureStore';
++import { clearAccessToken, clearSessionMeta, getAccessToken, getSessionMeta, saveAccessToken } from './secureStore';
+ import { useSession } from './session';
++import { firebaseAccessToken, isFirebaseAccessToken } from './accessToken';
++import { getRestoredFirebaseIdToken } from './firebase';
+ 
+ function watchlistAthlete(value: unknown): TrackedAthlete | null {
+   if (!value || typeof value !== 'object') return null;
+@@ -27,7 +29,7 @@ function watchlistAthlete(value: unknown): TrackedAthlete | null {
+   };
+ }
+ 
+-/** Restores and validates the Race Upshot Worker OTP session. */
++/** Restores and validates either a Worker OTP session or Firebase password session. */
+ export function AuthProvider({ children }: { children: ReactNode }) {
+   const status = useSession((state) => state.status);
+   const userId = useSession((state) => state.user?.uid);
+@@ -42,13 +44,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
+       if (!active) return;
+       if (!token || !meta) { setGuest(); return; }
+       try {
+-        const account = await AuthRepository.getAccount(token);
++        const restoredToken = isFirebaseAccessToken(token)
++          ? await getRestoredFirebaseIdToken(true).then((idToken) => idToken ? firebaseAccessToken(idToken) : null)
++          : token;
++        if (!restoredToken) throw new Error('Firebase session is unavailable.');
++        if (restoredToken !== token) await saveAccessToken(restoredToken);
++        const account = await AuthRepository.getAccount(restoredToken);
+         if (!active) return;
+         setAuthenticated({
+           uid: account.uid || meta.uid,
+           email: account.email || meta.email,
+           displayName: account.profile?.name || account.name || meta.email || meta.uid,
+-        }, token);
++        }, restoredToken);
+       } catch {
+         await Promise.allSettled([clearAccessToken(), clearSessionMeta(), clearDashboardCache()]);
+         if (active) setGuest();
+diff --git a/src/core/auth/accessToken.ts b/src/core/auth/accessToken.ts
+new file mode 100644
+index 0000000..0f15335
+--- /dev/null
++++ b/src/core/auth/accessToken.ts
+@@ -0,0 +1,13 @@
++export function authorizationForAccessToken(token: string): string {
++  const normalized = token.trim();
++  if (/^(?:Bearer|Otp)\s+/i.test(normalized)) return normalized;
++  return `Otp ${normalized}`;
++}
++
++export function firebaseAccessToken(idToken: string): string {
++  return `Bearer ${idToken.trim()}`;
++}
++
++export function isFirebaseAccessToken(token: string): boolean {
++  return /^Bearer\s+/i.test(token.trim());
++}
+diff --git a/src/core/auth/authenticatedFetch.ts b/src/core/auth/authenticatedFetch.ts
+index 78b95f0..709032e 100644
+--- a/src/core/auth/authenticatedFetch.ts
++++ b/src/core/auth/authenticatedFetch.ts
+@@ -6,7 +6,18 @@ import {
+   type HttpOptions,
+ } from "@/core/services/api/http";
+ 
+-import { getAccessToken } from "./secureStore";
++import { getAccessToken, saveAccessToken } from "./secureStore";
++import { authorizationForAccessToken, firebaseAccessToken, isFirebaseAccessToken } from "./accessToken";
++import { getRestoredFirebaseIdToken } from "./firebase";
++
++async function refreshAccessToken(token: string): Promise<string | null> {
++  if (!isFirebaseAccessToken(token)) return token;
++  const idToken = await getRestoredFirebaseIdToken(true);
++  if (!idToken) return null;
++  const refreshed = firebaseAccessToken(idToken);
++  await saveAccessToken(refreshed);
++  return refreshed;
++}
+ 
+ /**
+  * Authenticated API client. Mirrors the web's `authenticatedFetch`:
+@@ -25,10 +36,20 @@ export async function authenticatedJson<T>(
+   if (!token) {
+     throw apiError(401, "AUTH_REQUIRED", "Authentication required");
+   }
+-  return httpJson<T>(url, {
++  const send = (accessToken: string) => httpJson<T>(url, {
+     ...options,
+-    headers: { ...(options.headers ?? {}), Authorization: `Otp ${token}` },
++    headers: { ...(options.headers ?? {}), Authorization: authorizationForAccessToken(accessToken) },
+   });
++  try {
++    return await send(token);
++  } catch (error) {
++    const status = (error as { status?: number | null }).status;
++    if ((status === 401 || status === 403) && isFirebaseAccessToken(token)) {
++      const refreshed = await refreshAccessToken(token);
++      if (refreshed) return send(refreshed);
++    }
++    throw error;
++  }
+ }
+ 
+ /**
+@@ -44,7 +65,7 @@ export async function optionalAuthenticatedJson<T>(
+   const url = backendUrl(path);
+   return httpJson<T>(url, {
+     ...options,
+-    headers: { ...(options.headers ?? {}), ...(token ? { Authorization: `Otp ${token}` } : {}) },
++    headers: { ...(options.headers ?? {}), ...(token ? { Authorization: authorizationForAccessToken(token) } : {}) },
+   });
+ }
+ 
+@@ -64,10 +85,10 @@ export async function authenticatedUpload<T>(
+     throw apiError(401, "AUTH_REQUIRED", "Authentication required");
+   }
+ 
+-  const send = async (): Promise<T> => {
++  const send = async (accessToken: string): Promise<T> => {
+     const res = await fetchWithLogging(url, {
+       method: "POST",
+-      headers: { Authorization: `Otp ${token}` },
++      headers: { Authorization: authorizationForAccessToken(accessToken) },
+       body: form,
+     });
+     if (!res.ok) {
+@@ -80,5 +101,14 @@ export async function authenticatedUpload<T>(
+     return (await res.json()) as T;
+   };
+ 
+-  return send();
++  try {
++    return await send(token);
++  } catch (error) {
++    const status = (error as { status?: number | null }).status;
++    if ((status === 401 || status === 403) && isFirebaseAccessToken(token)) {
++      const refreshed = await refreshAccessToken(token);
++      if (refreshed) return send(refreshed);
++    }
++    throw error;
++  }
+ }
+diff --git a/src/core/auth/firebase.ts b/src/core/auth/firebase.ts
+index 62a99f0..fb5280e 100644
+--- a/src/core/auth/firebase.ts
++++ b/src/core/auth/firebase.ts
+@@ -118,3 +118,9 @@ export async function getOptionalFirebaseIdToken(forceRefresh = false): Promise<
+     return null;
+   }
+ }
++
++export async function getRestoredFirebaseIdToken(forceRefresh = false): Promise<string | null> {
++  const auth = await getFirebaseAuth();
++  await auth.authStateReady();
++  return auth.currentUser ? auth.currentUser.getIdToken(forceRefresh) : null;
++}
+diff --git a/src/core/auth/useAuth.ts b/src/core/auth/useAuth.ts
+index 38e31cb..7557783 100644
+--- a/src/core/auth/useAuth.ts
++++ b/src/core/auth/useAuth.ts
+@@ -1,4 +1,5 @@
+ import { useEffect, useState } from 'react';
++import { signInWithEmailAndPassword, signOut } from 'firebase/auth';
+ 
+ import { AuthRepository, type AccountStatusCode } from '@/core/repositories/auth.repository';
+ import { clearDashboardCache } from '@/core/repositories/mobile.repository';
+@@ -8,6 +9,8 @@ import type { ApiError } from '@/core/types';
+ 
+ import { clearAccessToken, clearSessionMeta, saveAccessToken, saveSessionMeta } from './secureStore';
+ import { useSession, type SessionUser } from './session';
++import { firebaseAccessToken } from './accessToken';
++import { getFirebaseAuth } from './firebase';
+ 
+ export type AuthStep = 'request' | 'verify';
+ export type AccountRequiredState = {
+@@ -20,6 +23,16 @@ function friendlyOtpErrorMessage(error: unknown): string {
+   return value.userMessage || value.message || 'Unable to verify the OTP. Please try again.';
+ }
+ 
++function friendlyPasswordErrorMessage(error: unknown): string {
++  const code = String((error as { code?: unknown })?.code || '').toLowerCase();
++  if (code.includes('invalid-credential') || code.includes('wrong-password') || code.includes('user-not-found')) return 'The email or password is incorrect.';
++  if (code.includes('too-many-requests')) return 'Too many sign-in attempts. Please wait and try again.';
++  if (code.includes('network-request-failed')) return 'The login service could not be reached. Check your connection and try again.';
++  const message = error instanceof Error ? error.message : '';
++  if (message.includes('Firebase configuration is not available')) return 'Password login is not configured in this app build.';
++  return 'Unable to log in with password. Please try again.';
++}
++
+ function accountUser(account: Awaited<ReturnType<typeof AuthRepository.getAccount>>, email: string): SessionUser {
+   return {
+     uid: account.uid || email,
+@@ -28,7 +41,7 @@ function accountUser(account: Awaited<ReturnType<typeof AuthRepository.getAccoun
+   };
+ }
+ 
+-/** Race Upshot mobile authentication uses the Worker-issued OTP session token. */
++/** Race Upshot mobile authentication supports Worker OTP sessions and Firebase password sessions. */
+ export function useAuth() {
+   const status = useSession((state) => state.status);
+   const user = useSession((state) => state.user);
+@@ -52,7 +65,7 @@ export function useAuth() {
+       const response = await AuthRepository.sendEmailOtp(normalized);
+       setEmail(normalized);
+       setStep('verify');
+-      setInfo(response.message || 'Code sent to your email.');
++      setInfo(response.message || 'Code sent by email and WhatsApp.');
+       setResendCooldownSeconds(60);
+       return true;
+     } catch (cause) {
+@@ -97,16 +110,43 @@ export function useAuth() {
+     }
+   }
+ 
+-  async function signInWithPassword(_email: string, _password: string): Promise<boolean> {
+-    setError('Race Upshot uses secure email OTP login. Select “Log in with OTP” to continue.');
+-    return false;
++  async function signInWithPassword(nextEmail: string, password: string): Promise<boolean> {
++    setPending(true);
++    setError(null);
++    setInfo(null);
++    setAccountRequired(null);
++    const normalizedEmail = nextEmail.trim().toLowerCase();
++    try {
++      const firebaseAuth = await getFirebaseAuth();
++      const credential = await signInWithEmailAndPassword(firebaseAuth, normalizedEmail, password);
++      const storedToken = firebaseAccessToken(await credential.user.getIdToken(true));
++      const account = await AuthRepository.getAccount(storedToken);
++      const sessionUser = accountUser(account, normalizedEmail);
++      await Promise.all([
++        saveAccessToken(storedToken),
++        saveSessionMeta({ uid: sessionUser.uid, email: sessionUser.email, lastLoginAt: Date.now() }),
++      ]);
++      setEmail(normalizedEmail);
++      setAuthenticated(sessionUser, storedToken);
++      return true;
++    } catch (cause) {
++      setError(friendlyPasswordErrorMessage(cause));
++      return false;
++    } finally {
++      setPending(false);
++    }
+   }
+ 
+   async function logout(): Promise<void> {
+     setGuest();
+     teardownPushRegistration();
+     queryClient.clear();
+-    await Promise.allSettled([clearSessionMeta(), clearAccessToken(), clearDashboardCache()]);
++    await Promise.allSettled([
++      clearSessionMeta(),
++      clearAccessToken(),
++      clearDashboardCache(),
++      getFirebaseAuth().then((auth) => signOut(auth)),
++    ]);
+     void resumePushRegistrationIfEnabled();
+   }
+ 
+diff --git a/src/core/navigation/useNotificationDeepLinks.ts b/src/core/navigation/useNotificationDeepLinks.ts
+index caacfe7..d7563eb 100644
+--- a/src/core/navigation/useNotificationDeepLinks.ts
++++ b/src/core/navigation/useNotificationDeepLinks.ts
+@@ -62,7 +62,15 @@ export function useNotificationDeepLinks() {
+         if (!response) return;
+         const data = response.notification.request.content.data as AthletePushData | undefined;
+         refreshCanonicalTiming(data);
+-        const isAthleteTiming = ['athleteUpdate', 'athlete_start', 'split', 'finish', 'leg_update']
++        const isAthleteTiming = [
++          'athleteUpdate',
++          'athlete_start',
++          'split',
++          'split_crossed',
++          'finish',
++          'leg_update',
++          'race_status',
++        ]
+           .includes(String(data?.type || ''));
+         if (isAthleteTiming && data?.eventId && (data?.bib || data?.athleteId || data?.participantUuid)) {
+           // Timing alerts always reopen the main event Tracker with the exact
+diff --git a/src/core/repositories/athlete-course-distance.test.ts b/src/core/repositories/athlete-course-distance.test.ts
+new file mode 100644
+index 0000000..3f5e859
+--- /dev/null
++++ b/src/core/repositories/athlete-course-distance.test.ts
+@@ -0,0 +1,91 @@
++import { describe, expect, it, vi } from 'vitest';
++vi.mock('@/core/services/api', () => ({ api: {}, liveApi: {} }));
++vi.mock('@/core/utils', () => ({ getCountryDisplayName: (v: unknown) => String(v ?? ''), getInitials: () => 'A' }));
++import { adaptPlatformParticipantResponse } from './athlete.repository';
++describe('current sport and transitions', () => {
++  const legs = [
++    { id: 'swim', type: 'SWIM', order: 0 }, { id: 't1', type: 'TRANSITION', order: 1 },
++    { id: 'bike', type: 'BIKE', order: 2 }, { id: 't2', type: 'TRANSITION', order: 3 },
++    { id: 'run', type: 'RUN', order: 4 },
++  ];
++  const splits = [
++    { id: 'swim-start', legId: 'swim', order: 0, distanceKm: 0 },
++    { id: 'swim-half', legId: 'swim', order: 1, distanceKm: 0.75 },
++    { id: 'swim-finish', legId: 'swim', order: 2, distanceKm: 1.5 },
++    { id: 'bike-start', legId: 'bike', order: 3, distanceKm: 1.6 },
++    { id: 'bike-finish', legId: 'bike', order: 4, distanceKm: 41.5 },
++    { id: 'run-start', legId: 'run', order: 5, distanceKm: 41.6 },
++    { id: 'finish', legId: 'run', order: 6, distanceKm: 51.5, isFinalRaceSplit: true },
++  ];
++  function at(id: string, raceStatus = 'STARTED', status = 'PROVISIONAL') {
++    return (adaptPlatformParticipantResponse({ data: {
++      participantUid: 'athlete', contestId: 'triathlon', raceStatus, currentLeg: 'SWIM',
++      splits: [{ splitId: id, status, readerTimestamp: '2026-10-19T08:00:00Z', chipTimeMs: 600000 }],
++      timingConfiguration: { legs, splits },
++    } }) as { data: { athlete: { currentLegName: string }; participantLive: { currentLeg: string; estimatedDistanceKm: number; distanceCoveredKm: number; predictedPaceSecondsPerKm?: number } } }).data;
++  }
++  it('enters T1 after swim finish and freezes sport-distance prediction', () => {
++    const result = at('swim-finish');
++    expect(result.athlete.currentLegName).toBe('Transition (T1)');
++    expect(result.participantLive.currentLeg).toBe('T1');
++    expect(result.participantLive.predictedPaceSecondsPerKm).toBeUndefined();
++    expect(result.participantLive.estimatedDistanceKm).toBe(1.5);
++  });
++  it('enters bike only when Bike Start is accepted, despite stale provider SWIM state', () => {
++    expect(at('bike-start').participantLive.currentLeg).toBe('BIKE');
++  });
++  it('enters T2 after Bike Finish, then RUN after Run Start', () => {
++    expect(at('bike-finish').participantLive.currentLeg).toBe('T2');
++    expect(at('run-start').participantLive.currentLeg).toBe('RUN');
++  });
++  it('does not treat an intermediate swim checkpoint as a transition', () => {
++    expect(at('swim-half').participantLive.currentLeg).toBe('SWIM');
++  });
++  it('does not infer a transition merely because a hidden finish was omitted', () => {
++    const result = adaptPlatformParticipantResponse({ data: {
++      participantUid: 'athlete', contestId: 'triathlon', raceStatus: 'STARTED',
++      splits: [{ splitId: 'swim-half', status: 'PROVISIONAL', chipTimeMs: 600000 }],
++      timingConfiguration: { legs, splits: splits.filter(split => split.id !== 'swim-finish') },
++    } }) as { data: { participantLive: { currentLeg: string } } };
++    expect(result.data.participantLive.currentLeg).toBe('SWIM');
++  });
++  it('stays in T1 when Bike Start is still pending', () => {
++    const result = adaptPlatformParticipantResponse({ data: {
++      participantUid: 'athlete', contestId: 'triathlon', raceStatus: 'STARTED',
++      splits: [
++        { splitId: 'swim-finish', status: 'PROVISIONAL', chipTimeMs: 600000 },
++        { splitId: 'bike-start', status: 'PENDING' },
++      ],
++      timingConfiguration: { legs, splits },
++    } }) as { data: { participantLive: { currentLeg: string } } };
++    expect(result.data.participantLive.currentLeg).toBe('T1');
++  });
++  it('does not enter transition from a pending reading or a stopped/finished athlete', () => {
++    expect(at('swim-finish', 'STARTED', 'PENDING').participantLive.currentLeg).toBe('SWIM');
++    expect(at('swim-finish', 'DNF').participantLive.currentLeg).toBe('SWIM');
++    expect(at('finish', 'FINISHED').participantLive.currentLeg).toBe('RUN');
++  });
++});
++describe('canonical course distance', () => {
++  it('uses 51.5 km at the final split instead of summing three erroneous 51.5 km legs', () => {
++    const output = adaptPlatformParticipantResponse({ data: {
++      participantUid: 'athlete', contestId: 'triathlon', displayName: 'Athlete', splits: [],
++      timingConfiguration: {
++        legs: [{ distanceKm: 51.5 }, { distanceKm: 51.5 }, { distanceKm: 51.5 }],
++        splits: [{ id: 'finish', order: 9, distanceKm: 51.5, isFinalRaceSplit: true }],
++      },
++    } }) as { data: { participantLive: { totalDistanceKm: number } } };
++    expect(output.data.participantLive.totalDistanceKm).toBe(51.5);
++  });
++  it('uses only the athlete’s contest, not another course’s finish', () => {
++    const output = adaptPlatformParticipantResponse({ data: {
++      participantUid: 'athlete', contestId: 'short', displayName: 'Athlete', splits: [],
++      timingConfiguration: {
++        legs: [{ distanceKm: 100 }],
++        splits: [{ id: 'long-finish', order: 9, distanceKm: 100, isFinalRaceSplit: true }],
++        splitsByContest: { short: [{ id: 'short-finish', order: 9, distanceKm: 10, isFinalRaceSplit: true }] },
++      },
++    } }) as { data: { participantLive: { totalDistanceKm: number } } };
++    expect(output.data.participantLive.totalDistanceKm).toBe(10);
++  });
++});
+diff --git a/src/core/repositories/athlete.repository.ts b/src/core/repositories/athlete.repository.ts
+index d186994..5262413 100644
+--- a/src/core/repositories/athlete.repository.ts
++++ b/src/core/repositories/athlete.repository.ts
+@@ -660,7 +660,7 @@ function normalizeLiveAthleteResponse(
+   } as AthleteModalResponse;
+ }
+ 
+-function adaptPlatformParticipantResponse(raw: unknown): unknown {
++export function adaptPlatformParticipantResponse(raw: unknown): unknown {
+   const envelope = asRecord(raw);
+   const participant = asRecord(envelope.data);
+   const participantUid = toText(
+@@ -690,15 +690,18 @@ function adaptPlatformParticipantResponse(raw: unknown): unknown {
+   const raceStatus = toText(participant.raceStatus) || "REGISTERED";
+   const contestId = toText(participant.contestId);
+   const ageGroup = displayCanonicalLabel(participant.ageGroup);
+-  const configuredLegs = Array.isArray(timingConfiguration.legs)
+-    ? timingConfiguration.legs.map(asRecord)
++  const context = asRecord(participant.contestContext);
++  const legSource = asRecord(timingConfiguration.legsByContest)[contestId || ''] ?? context.legs ?? timingConfiguration.legs;
++  const splitSource = asRecord(timingConfiguration.splitsByContest)[contestId || ''] ?? context.splits ?? timingConfiguration.splits;
++  const configuredLegs = Array.isArray(legSource)
++    ? legSource.map(asRecord)
+     : [];
+-  const configuredSplits = Array.isArray(timingConfiguration.splits)
+-    ? timingConfiguration.splits.map(asRecord)
++  const configuredSplits = Array.isArray(splitSource)
++    ? splitSource.map(asRecord).sort((a, b) => Number(a.order) - Number(b.order))
+     : [];
+   const configuredSplitFor = (split: Record<string, unknown>) => configuredSplits.find((configured) =>
+-    toText(configured.id) === toText(split.splitId)
+-    || toText(configured.name)?.toLowerCase() === toText(split.name)?.toLowerCase(),
++    (Boolean(toText(split.splitId)) && toText(configured.id) === toText(split.splitId))
++    || (Boolean(toText(split.name)) && toText(configured.name)?.toLowerCase() === toText(split.name)?.toLowerCase()),
+   );
+   const enrichedSplits = splits.map((split) => {
+     const configured = configuredSplitFor(split);
+@@ -710,18 +713,38 @@ function adaptPlatformParticipantResponse(raw: unknown): unknown {
+       legId: toText(configured?.legId) || split.legId,
+     };
+   });
+-  const latestSplit = asRecord(enrichedSplits.at(-1));
+-  const latestConfiguredSplit = configuredSplits.find((split) =>
+-    toText(split.id) === toText(latestSplit.splitId)
+-    || toText(split.name)?.toLowerCase() === toText(latestSplit.name)?.toLowerCase(),
+-  );
++  const acceptedSplits = enrichedSplits.filter(split => !['PENDING', 'MISSING', 'INVALID', 'REJECTED'].includes(toText(asRecord(split).status)?.toUpperCase() || ''));
++  const latestSplit = asRecord(acceptedSplits.at(-1));
++  const latestConfiguredSplit = configuredSplitFor(latestSplit);
+   const currentLegDefinition = configuredLegs.find((leg) =>
+     toText(leg.id) === toText(latestConfiguredSplit?.legId),
+   );
+-  const currentLeg = toText(participant.currentLeg)
+-    || toText(currentLegDefinition?.type)
+-    || toText(currentLegDefinition?.name);
+-  const totalDistanceKm = configuredLegs.reduce(
++  const currentLegType = toText(currentLegDefinition?.type)?.toUpperCase();
++  const latestCourseIndex = configuredSplits.findIndex(split => split === latestConfiguredSplit);
++  const nextCourseSplit = latestCourseIndex >= 0 ? configuredSplits[latestCourseIndex + 1] : undefined;
++  const nextCourseLeg = configuredLegs.find(leg => toText(leg.id) === toText(nextCourseSplit?.legId));
++  const sportLegs = [...configuredLegs].sort((a, b) => Number(a.order) - Number(b.order))
++    .filter(leg => ['SWIM', 'BIKE', 'RUN'].includes(toText(leg.type)?.toUpperCase() || ''));
++  const sportIndex = sportLegs.findIndex(leg => toText(leg.id) === toText(currentLegDefinition?.id));
++  const terminal = /^(FINISHED|DNF|DNS|DSQ|DNQ|OTL|CUTOFF_PENDING)$/i.test(raceStatus);
++  const acceptedLatest = !['PENDING', 'MISSING', 'INVALID', 'REJECTED'].includes(toText(latestSplit.status)?.toUpperCase() || '')
++    && (Boolean(latestSplit.readerTimestamp || latestSplit.timestamp) || Number.isFinite(Number(latestSplit.chipTimeMs ?? latestSplit.officialTimeMs)));
++  const completedSportBoundary = latestConfiguredSplit?.isLegFinish === true
++    || /(?:^|[\s_-])(?:finish|end)(?:$|[\s_-])/i.test([
++      latestConfiguredSplit?.importedName, latestConfiguredSplit?.name, latestConfiguredSplit?.id,
++    ].filter(Boolean).join(' '));
++  // Advance from a completed sport to transition, not to the next sport.
++  // Logical course order is authoritative even when physical mats are shared.
++  const inTransition = !terminal && acceptedLatest && completedSportBoundary && sportIndex >= 0
++    && latestConfiguredSplit?.isFinalRaceSplit !== true && Boolean(nextCourseLeg)
++    && toText(nextCourseLeg?.id) !== toText(currentLegDefinition?.id)
++    && ['SWIM', 'BIKE', 'RUN'].includes(currentLegType || '');
++  const currentLeg = inTransition ? `T${sportIndex + 1}`
++    : currentLegType || toText(currentLegDefinition?.name) || toText(participant.currentLeg);
++  const currentLegName = inTransition ? `Transition (${currentLeg})` : currentLeg;
++  const finalCourseSplit = configuredSplits.at(-1);
++  const finalDistance = finalCourseSplit?.isFinalRaceSplit === true ? Number(finalCourseSplit.distanceKm) : 0;
++  const totalDistanceKm = finalDistance > 0 ? finalDistance : Number(timingConfiguration.totalDistanceKm) > 0 ? Number(timingConfiguration.totalDistanceKm) : configuredLegs.reduce(
+     (total, leg) => total + (Number(leg.distanceKm) || 0),
+     0,
+   );
+@@ -733,7 +756,7 @@ function adaptPlatformParticipantResponse(raw: unknown): unknown {
+   const observedPaceSecondsPerKm = latestConfiguredDistanceKm > 0 && latestOfficialElapsedSeconds > 0
+     ? latestOfficialElapsedSeconds / latestConfiguredDistanceKm
+     : undefined;
+-  const paceSecondsPerKm = observedPaceSecondsPerKm ?? (currentLeg?.toUpperCase() === "SWIM"
++  const paceSecondsPerKm = inTransition ? undefined : observedPaceSecondsPerKm ?? (currentLeg?.toUpperCase() === "SWIM"
+     ? 1_800
+     : currentLeg?.toUpperCase() === "BIKE"
+       ? 180
+@@ -867,7 +890,7 @@ function adaptPlatformParticipantResponse(raw: unknown): unknown {
+         contestUuid: contestId,
+         status: raceStatus,
+         leg: currentLeg || "NOT_STARTED",
+-        currentLegName: currentLeg,
++        currentLegName,
+         distanceCoveredKm: latestConfiguredDistanceKm,
+         distanceRemainingKm: Math.max(0, totalDistanceKm - latestConfiguredDistanceKm),
+         estimatedFinish: estimatedFinishTime,
+@@ -1912,8 +1935,12 @@ async function loadLiveAthleteDetail(
+       // Canonical athlete data is the only live timing authority for both full
+       // and lightweight requests. Profile/course presentation is loaded via
+       // separate caches and can never replace this race-state snapshot.
++      // The current canonical roster bib is stable across provider relinks.
++      // A persisted watchlist can retain an older participant UUID; preferring
++      // that stale UUID returned another athlete and produced two markers for
++      // the same displayed person.
+       const platformParticipantId =
+-        participantUuid || normalized.bib || providerUuid || lookupKey;
++        normalized.bib || participantUuid || providerUuid || lookupKey;
+       const endpoints = [
+         {
+           url: `/api/v1/events/${encodeURIComponent(eventId)}/participants/${encodeURIComponent(platformParticipantId)}`,
+diff --git a/src/core/repositories/auth.repository.ts b/src/core/repositories/auth.repository.ts
+index 2287cfa..ccffedd 100644
+--- a/src/core/repositories/auth.repository.ts
++++ b/src/core/repositories/auth.repository.ts
+@@ -1,4 +1,5 @@
+ import { api } from '@/core/services/api';
++import { authorizationForAccessToken } from '@/core/auth/accessToken';
+ 
+ /**
+  * Auth repository — the OTP endpoints mirrored exactly from the web app.
+@@ -51,7 +52,7 @@ export type AccountStatusResult = {
+ };
+ 
+ export const AuthRepository = {
+-  async sendEmailOtp(email: string, _name?: string): Promise<SendEmailOtpResult> {
++  async sendEmailOtp(email: string): Promise<SendEmailOtpResult> {
+     const response = await api.json<LegacyApiEnvelope<{ requested: boolean; message: string }>>('/api/auth/otp/request', {
+       method: 'POST',
+       body: { email },
+@@ -76,13 +77,14 @@ export const AuthRepository = {
+ 
+   async getAccount(sessionToken: string) {
+     const response = await api.json<AthleteAccountEnvelope>('/api/v1/athlete/me', {
+-      headers: { Authorization: `Otp ${sessionToken}` },
++      headers: { Authorization: authorizationForAccessToken(sessionToken) },
+     });
+     if (!response.success || !response.data) throw new Error('Unable to load athlete account.');
+     return response.data;
+   },
+ 
+   checkAccountStatus(idToken: string): Promise<AccountStatusResult> {
++    void idToken;
+     return Promise.resolve({
+       success: true,
+       accountExists: true,
+diff --git a/src/core/repositories/canonicalTracking.repository.ts b/src/core/repositories/canonicalTracking.repository.ts
+index 60a0e9a..0b14a17 100644
+--- a/src/core/repositories/canonicalTracking.repository.ts
++++ b/src/core/repositories/canonicalTracking.repository.ts
+@@ -6,6 +6,7 @@ import {
+ 
+ import { isDevelopment } from '@/core/constants/env';
+ import { getAccessToken } from '@/core/auth/secureStore';
++import { authorizationForAccessToken } from '@/core/auth/accessToken';
+ import { backendUrl, fetchWithLogging } from '@/core/services/api';
+ 
+ const nonEmpty = z.string().trim().min(1);
+@@ -168,7 +169,7 @@ async function request<T>(path: string, eventId: string, schema: z.ZodType<T>, s
+       signal,
+       headers: {
+         Accept: 'application/json',
+-        ...(token ? { Authorization: `Otp ${token}` } : {}),
++        ...(token ? { Authorization: authorizationForAccessToken(token) } : {}),
+       },
+     });
+   }
+diff --git a/src/core/repositories/course.repository.gpx-contract.test.ts b/src/core/repositories/course.repository.gpx-contract.test.ts
+index 2e9f5dc..e173763 100644
+--- a/src/core/repositories/course.repository.gpx-contract.test.ts
++++ b/src/core/repositories/course.repository.gpx-contract.test.ts
+@@ -34,3 +34,19 @@ test("mobile course maps pass published coordinate arrays directly to geometry",
+     "published points must not be expanded into an oversized data URL",
+   );
+ });
++
++test("mobile requests scope geometry to the tracked ticket or contest", () => {
++  assert.match(repositorySource, /query\.set\('ticketId'/);
++  assert.match(repositorySource, /query\.set\('contestId'/);
++  assert.match(repositorySource, /query\.set\('category'/);
++  assert.match(repositorySource, /geometry: includeGeometry \? '1' : '0'/);
++  assert.match(repositorySource, /loadCourseMap\(eventId, signal, selection, includeGeometry\)/);
++});
++
++test("a stale athlete contest selection falls back to the event course", () => {
++  assert.match(repositorySource, /selectionWasScoped/);
++  assert.match(
++    repositorySource,
++    /data\.maps\.length === 0[\s\S]*raw = await requestCourse\(\)/,
++  );
++});
+diff --git a/src/core/repositories/course.repository.ts b/src/core/repositories/course.repository.ts
+index ac85a22..7a9dffb 100644
+--- a/src/core/repositories/course.repository.ts
++++ b/src/core/repositories/course.repository.ts
+@@ -19,10 +19,16 @@ export type CourseMapResources = CourseIndexResponse & {
+   courseMap: CourseMapResponse;
+ };
+ 
++export type CourseMapRequest = {
++  ticketId?: string;
++  contestId?: string;
++  contestName?: string;
++};
++
+ export interface ICourseRepository {
+   getCourseIndex(eventId: string, signal?: AbortSignal): Promise<CourseIndexResponse>;
+-  getCourseMap(eventId: string, signal?: AbortSignal): Promise<CourseMapResponse>;
+-  getCourseMapResources(eventId: string, signal?: AbortSignal): Promise<CourseMapResources>;
++  getCourseMap(eventId: string, signal?: AbortSignal, selection?: CourseMapRequest): Promise<CourseMapResponse>;
++  getCourseMapResources(eventId: string, signal?: AbortSignal, selection?: CourseMapRequest, includeGeometry?: boolean): Promise<CourseMapResources>;
+   getCourseConfig(eventId: string, signal?: AbortSignal): Promise<Record<string, unknown>>;
+ }
+ 
+@@ -108,8 +114,7 @@ function sanitizeCourseIndexResponse(response: CourseIndexResponse): CourseIndex
+   };
+ }
+ 
+-async function loadCourseIndex(eventId: string, signal?: AbortSignal): Promise<CourseIndexResponse> {
+-  const courseMap = await loadCourseMap(eventId, signal);
++function courseIndexFromMap(eventId: string, courseMap: CourseMapResponse): CourseIndexResponse {
+   const contests = Array.isArray(courseMap.ticketDefinitions)
+     ? courseMap.ticketDefinitions
+     : [];
+@@ -134,15 +139,39 @@ async function loadCourseIndex(eventId: string, signal?: AbortSignal): Promise<C
+   });
+ }
+ 
+-async function loadCourseMap(eventId: string, signal?: AbortSignal): Promise<CourseMapResponse> {
++async function loadCourseIndex(eventId: string, signal?: AbortSignal): Promise<CourseIndexResponse> {
++  return courseIndexFromMap(eventId, await loadCourseMap(eventId, signal, undefined, false));
++}
++
++async function loadCourseMap(eventId: string, signal?: AbortSignal, selection?: CourseMapRequest, includeGeometry = true): Promise<CourseMapResponse> {
+   try {
+-    const raw = await liveApi.json<{ success?: boolean; data?: Record<string, unknown> }>(
+-      `/api/v1/events/${encodeURIComponent(eventId)}/course?surface=mobile`,
+-      { signal },
++    const requestCourse = async (requestedSelection?: CourseMapRequest) => {
++      const query = new URLSearchParams({ surface: 'mobile', geometry: includeGeometry ? '1' : '0' });
++      if (text(requestedSelection?.ticketId)) query.set('ticketId', text(requestedSelection?.ticketId));
++      if (text(requestedSelection?.contestId)) query.set('contestId', text(requestedSelection?.contestId));
++      if (text(requestedSelection?.contestName)) query.set('category', text(requestedSelection?.contestName));
++      return liveApi.json<{ success?: boolean; data?: Record<string, unknown> }>(
++        `/api/v1/events/${encodeURIComponent(eventId)}/course?${query.toString()}`,
++        { signal },
++      );
++    };
++    let raw = await requestCourse(selection);
++    let data = raw.data && typeof raw.data === 'object' ? raw.data : {};
++    const selectionWasScoped = Boolean(
++      text(selection?.ticketId) ||
++      text(selection?.contestId) ||
++      text(selection?.contestName),
+     );
+-    const data = raw.data && typeof raw.data === 'object' ? raw.data : {};
++    // A participant can retain its former provider contest UUID while an
++    // event is republished with a new contest mapping. The scoped API then
++    // correctly returns no match, but the event's public default course is
++    // still usable and must remain visible while tracking that athlete.
++    if (selectionWasScoped && (!Array.isArray(data.maps) || data.maps.length === 0)) {
++      raw = await requestCourse();
++      data = raw.data && typeof raw.data === 'object' ? raw.data : {};
++    }
+     const maps = Array.isArray(data.maps) ? data.maps.filter((value): value is Record<string, unknown> => Boolean(value) && typeof value === 'object') : [];
+-    const categories = [...new Set(maps.map((map) => text(map.category) || 'Overall'))];
++    const routeKeys = [...new Set(maps.map((map) => text(map.ticketId) || text(map.category) || 'Overall'))];
+     const gpxUrl = (map: Record<string, unknown>) => {
+       // Public course responses deliberately omit the stored GPX body and
+       // expose its trusted file URL instead. Prefer that URL; otherwise every
+@@ -153,8 +182,10 @@ async function loadCourseMap(eventId: string, signal?: AbortSignal): Promise<Cou
+       if (xml) return `data:application/gpx+xml;charset=utf-8,${encodeURIComponent(xml)}`;
+       return '';
+     };
+-    const ticketDefinitions = categories.map((category) => {
+-      const categoryMaps = maps.filter((map) => (text(map.category) || 'Overall') === category);
++    const ticketDefinitions = routeKeys.map((routeKey) => {
++      const categoryMaps = maps.filter((map) => (text(map.ticketId) || text(map.category) || 'Overall') === routeKey);
++      const representative = categoryMaps[0] ?? {};
++      const category = text(representative.category) || routeKey;
+       const courseMaps: Record<string, unknown> = {};
+       for (const map of categoryMaps) {
+         const type = text(map.mapType).toUpperCase();
+@@ -178,7 +209,13 @@ async function loadCourseMap(eventId: string, signal?: AbortSignal): Promise<Cou
+           if (points.length > 1) courseMaps.runPoints = points;
+         }
+       }
+-      return { id: category, name: category, ticketName: category, courseMaps };
++      return {
++        id: text(representative.ticketId) || routeKey,
++        name: category,
++        ticketName: category,
++        providerContestUuid: text(representative.providerContestUuid) || undefined,
++        courseMaps,
++      };
+     });
+     return { success: raw.success, eventId, ...data, ticketDefinitions };
+   } catch (error) {
+@@ -191,32 +228,15 @@ export const ProductionCourseRepository: ICourseRepository = {
+   async getCourseIndex(eventId, signal) {
+     return loadCourseIndex(eventId, signal);
+   },
+-  async getCourseMap(eventId, signal) {
+-    return loadCourseMap(eventId, signal);
++  async getCourseMap(eventId, signal, selection) {
++    return loadCourseMap(eventId, signal, selection, Boolean(selection));
+   },
+-  async getCourseMapResources(eventId, signal) {
+-    const [courseMapResult, courseIndexResult] = await Promise.allSettled([
+-      loadCourseMap(eventId, signal),
+-      loadCourseIndex(eventId, signal),
+-    ]);
+-    // The event course-map endpoint is an independent, valid source of GPX
+-    // geometry. Do not discard it merely because the larger canonical course
+-    // index timed out on a mobile connection. This previously left the map
+-    // query in an error state and rendered the misleading "published closer
+-    // to race day" placeholder even though all GPX URLs were configured.
+-    if (
+-      courseIndexResult.status === 'rejected' &&
+-      courseMapResult.status === 'rejected'
+-    ) {
+-      throw courseIndexResult.reason;
+-    }
+-    const courseIndex = courseIndexResult.status === 'fulfilled'
+-      ? courseIndexResult.value
+-      : { success: false, eventId };
+-    const courseMap = courseMapResult.status === 'fulfilled'
+-      ? courseMapResult.value
+-      : { success: false, eventId };
+-    return { ...courseIndex, courseMap };
++  async getCourseMapResources(eventId, signal, selection, includeGeometry = false) {
++    // One response contains both timing metadata and the selected course.
++    // Unscoped screens receive metadata only; athlete tracking receives only
++    // the selected ticket/contest geometry instead of every event route.
++    const courseMap = await loadCourseMap(eventId, signal, selection, includeGeometry);
++    return { ...courseIndexFromMap(eventId, courseMap), courseMap };
+   },
+   async getCourseConfig(eventId, signal) {
+     return loadCourseMap(eventId, signal);
+diff --git a/src/core/repositories/leaderboard.repository.ts b/src/core/repositories/leaderboard.repository.ts
+index bc9b171..7451e95 100644
+--- a/src/core/repositories/leaderboard.repository.ts
++++ b/src/core/repositories/leaderboard.repository.ts
+@@ -56,6 +56,7 @@ export const ProductionLeaderboardRepository: ILeaderboardRepository = {
+         bibNumber: String(entry.bib ?? ''),
+         contest: String(entry.contestName ?? ''),
+         overallTime: String(entry.elapsedTime ?? entry.finishTime ?? '—'),
++        rank: Number(entry.overallRank ?? entry.rank ?? 0),
+         overallRank: Number(entry.overallRank ?? entry.rank ?? 0),
+       })) as unknown as LeaderboardResponse['athletes'];
+       return { success: true, eventId, athletes, count: athletes.length, total: athletes.length, source: 'raceupshot' };
+diff --git a/src/core/services/api/client.ts b/src/core/services/api/client.ts
+index e224200..81700dc 100644
+--- a/src/core/services/api/client.ts
++++ b/src/core/services/api/client.ts
+@@ -1,5 +1,7 @@
+ import { env } from '@/core/constants/env';
+-import { getAccessToken } from '@/core/auth/secureStore';
++import { getAccessToken, saveAccessToken } from '@/core/auth/secureStore';
++import { authorizationForAccessToken, firebaseAccessToken, isFirebaseAccessToken } from '@/core/auth/accessToken';
++import { getRestoredFirebaseIdToken } from '@/core/auth/firebase';
+ 
+ import { httpJson, httpText, type HttpOptions } from './http';
+ 
+@@ -44,7 +46,7 @@ export const liveApi = {
+           ...(suppliedAuthorization
+             ? { Authorization: suppliedAuthorization }
+             : sessionToken
+-              ? { Authorization: `Otp ${sessionToken}` }
++              ? { Authorization: authorizationForAccessToken(sessionToken) }
+               : {}),
+         },
+       },
+@@ -55,7 +57,15 @@ export const liveApi = {
+       const status = (error as { status?: number | null }).status;
+       if (!suppliedAuthorization && token && (status === 401 || status === 403)) {
+         let refreshedToken: string | null = null;
+-        try { refreshedToken = await getAccessToken(); } catch { refreshedToken = null; }
++        try {
++          if (isFirebaseAccessToken(token)) {
++            const idToken = await getRestoredFirebaseIdToken(true);
++            refreshedToken = idToken ? firebaseAccessToken(idToken) : null;
++            if (refreshedToken) await saveAccessToken(refreshedToken);
++          } else {
++            refreshedToken = await getAccessToken();
++          }
++        } catch { refreshedToken = null; }
+         return withToken(refreshedToken);
+       }
+       throw error;
+diff --git a/src/core/services/api/http.ts b/src/core/services/api/http.ts
+index a46df63..e805133 100644
+--- a/src/core/services/api/http.ts
++++ b/src/core/services/api/http.ts
+@@ -212,18 +212,57 @@ function logResponse(
+   }
+ }
+ 
+-function isApplicationError(payload: unknown): payload is {
+-  success: false;
+-  message?: string;
+-  error?: string;
+-  detail?: string;
+-} {
+-  return Boolean(
+-    payload &&
+-    typeof payload === "object" &&
+-    !Array.isArray(payload) &&
+-    (payload as { success?: unknown }).success === false,
+-  );
++type ApplicationErrorDetails = {
++  status: number;
++  code: string;
++  message: string;
++  userMessage: string;
++  retryable: boolean;
++};
++
++function errorStatus(code: string, type: string, httpStatus: number): number {
++  const key = `${code}:${type.toLowerCase()}`;
++  if (/^(4010|4040):|:(not_authorized|no_token)$/.test(key)) return 401;
++  if (/^(4030|4061):|:(access_denied|secret_required)$/.test(key)) return 403;
++  if (/^4440:|:rate_limit$/.test(key)) return 429;
++  if (/^5030:|:service_unavailable$/.test(key)) return 503;
++  if (/^5000:|:failed$/.test(key)) return 502;
++  if (/^2040:|:no_results$/.test(key)) return 404;
++  if (/^2041:|:too_many_results$/.test(key)) return 422;
++  if (/^(4000|4060):|:(bad_query|secure_socket_required)$/.test(key)) return 400;
++  return httpStatus >= 400 ? httpStatus : 502;
++}
++
++function retryableValue(value: unknown): boolean | undefined {
++  if (typeof value === "boolean") return value;
++  if (value === 1 || value === "1" || String(value).toLowerCase() === "true") return true;
++  if (value === 0 || value === "0" || String(value).toLowerCase() === "false") return false;
++  return undefined;
++}
++
++/** Handles both Race Upshot envelopes and provider error objects returned with HTTP 200. */
++export function applicationErrorDetails(payload: unknown, httpStatus: number): ApplicationErrorDetails | null {
++  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
++  const root = payload as Record<string, unknown>;
++  const nested = root.error && typeof root.error === "object" && !Array.isArray(root.error)
++    ? root.error as Record<string, unknown>
++    : null;
++  if (root.success !== false && !nested) return null;
++
++  const rawError = typeof root.error === "string" ? root.error : "";
++  const code = String(nested?.code ?? nested?.type ?? root.code ?? "API_ERROR").trim() || "API_ERROR";
++  const type = String(nested?.type ?? "").trim();
++  const message = String(nested?.message ?? nested?.msg ?? root.message ?? root.detail ?? rawError ?? "API request failed.").trim()
++    || "API request failed.";
++  const userMessage = String(nested?.display ?? root.display ?? message).trim() || message;
++  const status = errorStatus(code, type, httpStatus);
++  return {
++    status,
++    code,
++    message,
++    userMessage,
++    retryable: retryableValue(nested?.retryable ?? root.retryable) ?? (status === 429 || status >= 500),
++  };
+ }
+ 
+ function safeParseJson(text: string, method: string, url: string): unknown {
+@@ -381,17 +420,24 @@ export async function httpJson<T>(
+   const data = shouldParseJson
+     ? safeParseJson(text, method, finalUrl)
+     : undefined;
++  const embeddedError = applicationErrorDetails(data, res.status);
+ 
+   logResponse(method, finalUrl, res.status, data ?? text);
+ 
+   if (!res.ok) {
+     const msg = `${method.toUpperCase()} ${finalUrl} -> HTTP ${res.status}: ${safeStringify(data ?? text)}`;
+-    throw apiError(res.status, `HTTP_${res.status}`, msg);
++    throw apiError(embeddedError?.status ?? res.status, embeddedError?.code ?? `HTTP_${res.status}`, msg, embeddedError ? {
++      userMessage: embeddedError.userMessage,
++      retryable: embeddedError.retryable,
++    } : undefined);
+   }
+ 
+-  if (isApplicationError(data)) {
++  if (embeddedError) {
+     const msg = `${method.toUpperCase()} ${finalUrl} -> API_ERROR: ${safeStringify(data)}`;
+-    throw apiError(res.status, "API_ERROR", msg);
++    throw apiError(embeddedError.status, embeddedError.code, msg, {
++      userMessage: embeddedError.userMessage,
++      retryable: embeddedError.retryable,
++    });
+   }
+ 
+   return data as T;
+diff --git a/src/features/auth/components/LoginScreen.tsx b/src/features/auth/components/LoginScreen.tsx
+index 83df130..9062959 100644
+--- a/src/features/auth/components/LoginScreen.tsx
++++ b/src/features/auth/components/LoginScreen.tsx
+@@ -47,7 +47,7 @@ export function LoginScreen() {
+   const router = useRouter();
+   const auth = useAuth();
+   const [shake] = useState(() => new Animated.Value(0));
+-  const [loginMethod, setLoginMethod] = useState<"otp" | "password">("otp");
++  const [loginMethod, setLoginMethod] = useState<"otp" | "password">("password");
+ 
+   const emailFormApi = useForm<EmailForm>({
+     resolver: zodResolver(emailForm),
+@@ -158,6 +158,14 @@ export function LoginScreen() {
+     else router.replace("/");
+   };
+ 
++  const chooseLoginMethod = (next: "otp" | "password") => {
++    setLoginMethod(next);
++    otpForm.reset({ code: "" });
++    passwordFormApi.reset({ password: "" });
++    auth.backToRequest();
++    auth.clearAccountRequired();
++  };
++
+   if (auth.accountRequired) {
+     return (
+       <Screen scroll>
+@@ -261,11 +269,46 @@ export function LoginScreen() {
+           {loginMethod === "password"
+             ? "Enter your email and password to continue."
+             : auth.step === "request"
+-              ? "Enter your email and we’ll send you a one-time code."
+-              : `Enter the 6-digit code sent to ${auth.email}.`}
++              ? "Enter your email and we’ll send one code by email and WhatsApp."
++              : `Enter the 6-digit code sent to ${auth.email} and its registered WhatsApp number.`}
+         </Text>
+       </View>
+ 
++      <View
++        style={{
++          flexDirection: "row",
++          gap: theme.spacing.xs,
++          padding: theme.spacing.xs,
++          marginBottom: theme.spacing.xl,
++          borderRadius: theme.radius.medium,
++          backgroundColor: theme.colors.surfaceSunken,
++        }}
++      >
++        {(["password", "otp"] as const).map((method) => {
++          const selected = loginMethod === method;
++          return (
++            <Pressable
++              key={method}
++              accessibilityRole="button"
++              accessibilityState={{ selected }}
++              onPress={() => chooseLoginMethod(method)}
++              style={{
++                flex: 1,
++                minHeight: 44,
++                alignItems: "center",
++                justifyContent: "center",
++                borderRadius: theme.radius.small,
++                backgroundColor: selected ? theme.colors.accent : "transparent",
++              }}
++            >
++              <Text variant="label" color={selected ? "onAccent" : "textSecondary"}>
++                {method === "password" ? "PASSWORD" : "OTP"}
++              </Text>
++            </Pressable>
++          );
++        })}
++      </View>
++
+       {loginMethod === "password" ? (
+         <View style={{ gap: theme.spacing.base }}>
+           <Controller
+@@ -316,21 +359,9 @@ export function LoginScreen() {
+             loading={auth.pending}
+             onPress={submitPassword}
+           />
+-          <View style={{ alignItems: "center", gap: theme.spacing.sm }}>
+-            <Text variant="bodySmall" color="textMuted">
+-              Don&apos;t remember your password?
+-            </Text>
+-            <Button
+-              label="Log in with OTP"
+-              variant="ghost"
+-              fullWidth
+-              onPress={() => {
+-                setLoginMethod("otp");
+-                auth.backToRequest();
+-                auth.clearAccountRequired();
+-              }}
+-            />
+-          </View>
++          <Text variant="bodySmall" color="textMuted" center>
++            Don&apos;t remember your password? Select OTP above.
++          </Text>
+         </View>
+       ) : auth.step === "request" ? (
+         <View style={{ gap: theme.spacing.base }}>
+@@ -367,16 +398,6 @@ export function LoginScreen() {
+             loading={auth.pending}
+             onPress={submitEmail}
+           />
+-          <Button
+-            label="Log in with password"
+-            variant="ghost"
+-            fullWidth
+-            onPress={() => {
+-              setLoginMethod("password");
+-              auth.backToRequest();
+-              auth.clearAccountRequired();
+-            }}
+-          />
+         </View>
+       ) : (
+         <View style={{ gap: theme.spacing.base }}>
+diff --git a/src/features/events/components/EventTrackScreen.tsx b/src/features/events/components/EventTrackScreen.tsx
+index c553942..97e3d37 100644
+--- a/src/features/events/components/EventTrackScreen.tsx
++++ b/src/features/events/components/EventTrackScreen.tsx
+@@ -317,7 +317,7 @@ export function EventTrackScreen() {
+   const selectedMapAthlete = athletes.find(
+     (athlete) => !athlete.eventId || athlete.eventId === id,
+   );
+-  const geometryQuery = useCourseGeometry(id, eventQuery.event?.raw, true, {
++  const geometryQuery = useCourseGeometry(id, eventQuery.event?.raw, Boolean(selectedMapAthlete), {
+     ticketId: selectedMapAthlete?.ticketId,
+     contestId:
+       selectedMapAthlete?.providerContestUuid ??
+diff --git a/src/features/events/components/LiveTrackScreen.tsx b/src/features/events/components/LiveTrackScreen.tsx
+index 51fd6ca..0ef9477 100644
+--- a/src/features/events/components/LiveTrackScreen.tsx
++++ b/src/features/events/components/LiveTrackScreen.tsx
+@@ -45,7 +45,7 @@ import {
+   Skeleton,
+   Text,
+ } from "@/shared/components";
+-import { useDebouncedValue } from "@/shared/hooks";
++import { useDebouncedValue, useSlowNetwork } from "@/shared/hooks";
+ import { useWatchlist } from "@/features/tracking/watchlist/hooks/useWatchlist";
+ import { markCanonicalParticipantRendered } from "@/features/tracking/hooks/useCanonicalChangeStream";
+ import {
+@@ -82,6 +82,7 @@ import {
+   buildCumulativePath,
+   estimatedDistanceKm,
+   distanceToFraction,
++  nearestPositionOnPath,
+   positionAtFraction,
+   useRaceClock,
+ } from "@/features/tracking/engine";
+@@ -93,7 +94,12 @@ import { resolveCanonicalRaceState } from "@/features/tracking/timing/canonicalR
+ import { isLiveTimingAwaitingCutoffUpdate } from "@/features/tracking/timing/cutoffTiming";
+ import { useSharedLiveNow } from "@/features/tracking/timing/sharedLiveClock";
+ import type { AthleteRaceTiming } from "@/features/tracking/timing/raceSections";
+-import { transitionDurationForStage } from "@/features/tracking/timing/compactRaceProgressTiming";
++import {
++  liveTransitionElapsedSeconds,
++  transitionDurationForStage,
++  transitionTimeLabelForStage,
++} from "@/features/tracking/timing/compactRaceProgressTiming";
++import { mapLegProgress, mapSport } from "@/features/tracking/timing/mapLegProgress";
+ import {
+   CourseOverviewCard,
+   CutoffCard,
+@@ -363,7 +369,12 @@ function normalizeSearchText(value: unknown): string {
+ }
+ 
+ function normalizeBib(value: unknown): string {
+-  const normalized = text(value);
++  const raw = text(value);
++  const tagged = raw.match(/(?:^|:)bib:([^:]+)/i)?.[1];
++  const imported = raw.match(
++    /^(?:import|race|participant|athlete|timing):.+:([^:]+)$/i,
++  )?.[1];
++  const normalized = tagged || imported || raw;
+   return /^\d+$/.test(normalized)
+     ? normalized.replace(/^0+(?=\d)/, "")
+     : normalized.toLowerCase();
+@@ -938,7 +949,7 @@ function CompactTrackedCarousel({
+   const initialPage = Math.max(0, Math.min(selectedIndex, rows.length - 1));
+   const [page, setPage] = useState(initialPage);
+   const hasRunningAthlete = rows.some(
+-    ({ detail }) => !detail?.result && detail?.header.status === "live",
++    ({ detail }) => isDetailClockRunning(detail),
+   );
+   const nowMs = useSharedLiveNow(hasRunningAthlete);
+   const cardWidth = Math.max(240, width - 48);
+@@ -1197,6 +1208,7 @@ function CompactTrackedCarousel({
+                     />
+                   ) : null}
+                   <CompactRaceProgress
++                    clockIdentity={stableAthleteKey(athlete, String(index))}
+                     contest={contest || ""}
+                     raceCategory={raceCategory || detail?.header.raceCategory}
+                     legLabel={detail?.raceProgress?.legLabel || status}
+@@ -1227,9 +1239,7 @@ function CompactTrackedCarousel({
+                       metricValue(detail?.liveStats, "Elapsed") ||
+                       metricValue(detail?.liveStats, "Athlete Race Time")
+                     }
+-                    clockRunning={Boolean(
+-                      !canonicalFinished && detail?.header.status === "live",
+-                    )}
++                    clockRunning={isDetailClockRunning(detail)}
+                     cutoffs={cutoffs}
+                     cutoffRows={detail?.cutoffs}
+                     raceStartedAt={detail?.raceStartedAt}
+@@ -1520,9 +1530,10 @@ function CompactMapAthleteCard({
+     parseElapsedClock(metricValue(detail?.liveStats, "Elapsed")) ??
+     parseElapsedClock(metricValue(detail?.liveStats, "Athlete Race Time"));
+   const { elapsedSeconds, nowMs } = useContinuousElapsedSeconds({
+-    running: Boolean(detail?.header.status === "live" && !finished),
++    running: isDetailClockRunning(detail),
+     raceStartedAt: detail?.raceStartedAt,
+     canonicalElapsedSeconds: canonicalElapsed,
++    identityKey: stableAthleteKey(row.athlete, row.athlete.id),
+   });
+   const cutoffUpdatePending = isLiveTimingAwaitingCutoffUpdate({
+     detail,
+@@ -1948,8 +1959,9 @@ function SelectedAthletePanel({
+   onRemove: () => void;
+ }) {
+   const theme = useTheme();
++  const athleteSlow = useSlowNetwork(Boolean(row?.initialLoading));
+   const cutoffNowMs = useSharedLiveNow(
+-    Boolean(row?.detail?.header.status === "live"),
++    isDetailClockRunning(row?.detail),
+   );
+   const swipeResponder = useMemo(
+     () =>
+@@ -2007,7 +2019,9 @@ function SelectedAthletePanel({
+             Loading live tracking…
+           </Text>
+           <Text variant="bodySmall" style={{ color: "#C4CAD3" }}>
+-            Assembling athlete, course, official timing, rankings, and map data.
++            {athleteSlow
++              ? "Slow connection detected. Athlete timing is still loading; your tracked selection is safe."
++              : "Assembling athlete, course, official timing, rankings, and map data."}
+           </Text>
+           <Skeleton height={18} radius={9} />
+           <Skeleton height={90} radius={14} />
+@@ -2444,6 +2458,7 @@ function SelectedAthletePanel({
+         ) : null}
+ 
+         <CompactRaceProgress
++          clockIdentity={stableAthleteKey(row.athlete, detail.id)}
+           contest={header.contest || row.athlete.category || ""}
+           raceCategory={raceCategory || header.raceCategory}
+           legLabel={detail.raceProgress?.legLabel || status}
+@@ -2455,7 +2470,7 @@ function SelectedAthletePanel({
+           raceTiming={detail.raceTiming}
+           finishTime={finishTime}
+           elapsedTime={finishTime}
+-          clockRunning={!canonicalFinished && header.status === "live"}
++          clockRunning={isDetailClockRunning(detail)}
+           cutoffs={row.cutoffs}
+           cutoffRows={detail.cutoffs}
+           raceStartedAt={detail.raceStartedAt}
+@@ -2472,7 +2487,7 @@ function SelectedAthletePanel({
+                   contest={header.contest}
+                   raceCategory={raceCategory || header.raceCategory}
+                   raceStartedAt={detail.raceStartedAt}
+-                  clockRunning={!canonicalFinished && header.status === "live"}
++                  clockRunning={isDetailClockRunning(detail)}
+                   raceStartTimeOfDay={
+                     detail.startTiming.officialStartLabel ??
+                     detail.startTiming.gunStartLabel
+@@ -2495,13 +2510,18 @@ function SelectedAthletePanel({
+                   participantCount={participantCount}
+                 />
+               ) : null}
+-              {!cutoffUpdatePending && raceState.showPrediction && (detail.prediction ||
++              {(cutoffUpdatePending || raceState.showPrediction) &&
++              (cutoffUpdatePending || detail.prediction ||
+                 detail.nextSplit ||
+                 detail.predictedCheckpoints?.length) ? (
+                   <PredictionCard
+                     nextSplit={detail.nextSplit}
+                     projected={detail.prediction}
+                     checkpoints={detail.predictedCheckpoints}
++                    timeline={detail.timeline}
++                    raceStartedAt={detail.raceStartedAt}
++                    clockRunning={isDetailClockRunning(detail)}
++                    noFinishTime={cutoffUpdatePending || raceState.status === "STOPPED"}
+                   />
+                 ) : null}
+               {detail.rankings.length > 0 ? (
+@@ -2554,40 +2574,83 @@ function displayElapsedClock(value?: string): string | undefined {
+ 
+ /** Maps a merged canonical participant into the one lifecycle used by every live surface. */
+ function resolveDetailRaceState(detail?: AthleteDetailViewModel) {
+-  return resolveCanonicalRaceState({
++  const state = resolveCanonicalRaceState({
+     resultStatus: detail?.result?.statusLabel,
+     terminalStatus: detail?.header.statusLabel,
+     sections: detail?.raceTiming?.sections,
+     timeline: detail?.timeline,
+   });
++  // Accepted START evidence is authoritative even while a newly selected
++  // athlete's canonical sections are still being rebuilt. The provider can
++  // legitimately publish 00:00:00 until the next mat; never freeze that zero.
++  if (
++    state.status === "NOT_STARTED" &&
++    (detail?.startTiming.hasAcceptedStart === true ||
++      (detail?.raceStartedAt != null && Number.isFinite(detail.raceStartedAt)))
++  ) {
++    return { ...state, status: "IN_PROGRESS" as const };
++  }
++  return state;
+ }
+ 
+ function hasOfficialCanonicalFinish(detail?: AthleteDetailViewModel): boolean {
+   return resolveDetailRaceState(detail).hasConfirmedFinish;
+ }
+ 
++function isDetailClockRunning(detail?: AthleteDetailViewModel): boolean {
++  if (!detail || hasOfficialCanonicalFinish(detail)) return false;
++  return (
++    resolveDetailRaceState(detail).status === "IN_PROGRESS" ||
++    detail.startTiming.hasAcceptedStart === true ||
++    (detail.raceStartedAt != null && Number.isFinite(detail.raceStartedAt))
++  );
++}
++
++const elapsedClockCache = new Map<
++  string,
++  { elapsedSeconds: number; atMs: number }
++>();
++
+ function useContinuousElapsedSeconds({
+   running,
+   raceStartedAt,
+   canonicalElapsedSeconds,
++  identityKey = "",
+ }: {
+   running: boolean;
+   raceStartedAt?: number;
+   canonicalElapsedSeconds: number | null;
++  identityKey?: string;
+ }) {
+   const nowMs = useSharedLiveNow(running);
++  const cached = identityKey ? elapsedClockCache.get(identityKey) : undefined;
++  const cachedElapsedSeconds = cached
++    ? cached.elapsedSeconds + (running ? Math.max(0, (Date.now() - cached.atMs) / 1_000) : 0)
++    : null;
++  const initialElapsedSeconds = canonicalElapsedSeconds == null
++    ? cachedElapsedSeconds
++    : Math.max(canonicalElapsedSeconds, cachedElapsedSeconds ?? 0);
+   const anchorRef = useRef({
++    identityKey,
+     sourceSeconds: canonicalElapsedSeconds,
+-    elapsedSeconds: canonicalElapsedSeconds,
++    elapsedSeconds: initialElapsedSeconds,
+     atMs: Date.now(),
+   });
+-  if (anchorRef.current.sourceSeconds !== canonicalElapsedSeconds) {
++  if (anchorRef.current.identityKey !== identityKey) {
++    anchorRef.current = {
++      identityKey,
++      sourceSeconds: canonicalElapsedSeconds,
++      elapsedSeconds: initialElapsedSeconds,
++      atMs: Date.now(),
++    };
++  } else if (anchorRef.current.sourceSeconds !== canonicalElapsedSeconds) {
+     const currentEstimate =
+       anchorRef.current.elapsedSeconds == null
+         ? null
+         : anchorRef.current.elapsedSeconds +
+           Math.max(0, (Date.now() - anchorRef.current.atMs) / 1_000);
+     anchorRef.current = {
++      identityKey,
+       sourceSeconds: canonicalElapsedSeconds,
+       elapsedSeconds:
+         canonicalElapsedSeconds == null
+@@ -2596,10 +2659,16 @@ function useContinuousElapsedSeconds({
+       atMs: Date.now(),
+     };
+   }
++  const startElapsedSeconds =
++    raceStartedAt &&
++    Number.isFinite(raceStartedAt) &&
++    nowMs >= raceStartedAt
++      ? Math.max(0, Math.floor((nowMs - raceStartedAt) / 1_000))
++      : null;
+   const elapsedSeconds = !running
+     ? canonicalElapsedSeconds
+-    : raceStartedAt && Number.isFinite(raceStartedAt)
+-      ? Math.max(0, Math.floor((nowMs - raceStartedAt) / 1_000))
++    : startElapsedSeconds != null
++      ? startElapsedSeconds
+       : anchorRef.current.elapsedSeconds == null
+         ? null
+         : Math.max(
+@@ -2609,6 +2678,16 @@ function useContinuousElapsedSeconds({
+                 (nowMs - anchorRef.current.atMs) / 1_000,
+             ),
+           );
++  if (identityKey && elapsedSeconds != null && Number.isFinite(elapsedSeconds)) {
++    elapsedClockCache.set(identityKey, {
++      elapsedSeconds,
++      atMs: nowMs,
++    });
++    if (elapsedClockCache.size > 100) {
++      const oldestKey = elapsedClockCache.keys().next().value;
++      if (oldestKey) elapsedClockCache.delete(oldestKey);
++    }
++  }
+   return { elapsedSeconds, nowMs };
+ }
+ 
+@@ -2656,7 +2735,7 @@ function CompactLiveTimingSummaryContent({
+           )
+       : timeline[0];
+   const raceState = resolveDetailRaceState(detail);
+-  const running = raceState.status === "IN_PROGRESS";
++  const running = isDetailClockRunning(detail);
+ 
+   useEffect(() => {
+     let mounted = true;
+@@ -2689,6 +2768,7 @@ function CompactLiveTimingSummaryContent({
+       running,
+       raceStartedAt: detail.raceStartedAt,
+       canonicalElapsedSeconds: canonicalLiveElapsed,
++      identityKey: detail.id,
+     });
+   const elapsedSeconds = continuousElapsedSeconds ?? completedElapsed ?? 0;
+   const predictedElapsed = parseElapsedClock(detail.nextSplit?.etaElapsed);
+@@ -2696,11 +2776,9 @@ function CompactLiveTimingSummaryContent({
+     detail.nextSplit?.etaRemaining,
+   );
+   const etaRemaining =
+-    canonicalEtaRemaining != null
+-      ? canonicalEtaRemaining
+-      : predictedElapsed != null
+-        ? Math.max(0, predictedElapsed - elapsedSeconds)
+-        : null;
++    predictedElapsed != null
++      ? Math.max(0, predictedElapsed - elapsedSeconds)
++      : canonicalEtaRemaining;
+   const coveredLabel =
+     detail.raceProgress?.coveredLabel?.replace(/\s+done$/i, "") || "—";
+   const remainingValue = Number(
+@@ -2728,6 +2806,16 @@ function CompactLiveTimingSummaryContent({
+   const finished = raceState.hasConfirmedFinish;
+   const notStarted = raceState.status === "NOT_STARTED";
+   const stopped = raceState.status === "STOPPED";
++  const predictedArrivalDelta =
++    predictedElapsed != null ? predictedElapsed - elapsedSeconds : null;
++  const waitingAtPredictedMat =
++    !finished &&
++    predictedArrivalDelta != null &&
++    predictedArrivalDelta <= 0 &&
++    Boolean(detail.nextSplit?.checkpoint);
++  const predictedMatOverdueSeconds = waitingAtPredictedMat
++    ? Math.abs(predictedArrivalDelta ?? 0)
++    : null;
+   const nextName =
+     detail.nextSplit?.checkpoint || nextRow?.splitLabel || nextRow?.name || "—";
+   const remainingLabel =
+@@ -2848,17 +2936,21 @@ function CompactLiveTimingSummaryContent({
+             label: "NEXT",
+             value: awaitingOfficialFinishMat ? "FINISH MAT" : nextName,
+             secondary:
+-              awaitingOfficialFinishMat
++              waitingAtPredictedMat
++                ? `WAITING AT MAT · ${formatElapsedClock(predictedMatOverdueSeconds ?? 0)} OVERDUE`
++                : awaitingOfficialFinishMat
+                 ? "AWAITING OFFICIAL READ"
+                 : etaRemaining != null
+                 ? `ETA IN ${formatElapsedClock(etaRemaining)}`
+                 : remainingLabel,
+           },
+-          {
+-            label: "EST. FINISH",
+-            value: predictedFinish,
+-            secondary: projectedDuration || "WAITING FOR SPLIT",
+-          },
++          ...(detail.prediction?.finishTimeLabel
++            ? [{
++                label: "EST. FINISH",
++                value: predictedFinish,
++                secondary: projectedDuration || "PREDICTED",
++              }]
++            : []),
+           {
+             label: "DISTANCE · OFFICIAL",
+             value:
+@@ -2967,7 +3059,7 @@ function CompactLiveTimingSummaryContent({
+           {metric?.secondary}
+         </Text>
+       </Animated.View>
+-      {!cutoffUpdatePending && awaitingOfficialFinishMat ? (
++      {!cutoffUpdatePending && (awaitingOfficialFinishMat || waitingAtPredictedMat) ? (
+         <View
+           style={{
+             flexDirection: "row",
+@@ -2994,7 +3086,9 @@ function CompactLiveTimingSummaryContent({
+             variant="caption"
+             style={{ color: "#FFD4D9", fontWeight: "900", fontSize: 10 }}
+           >
+-            AT FINISH · WAITING FOR OFFICIAL MAT READ
++            {awaitingOfficialFinishMat
++              ? "AT FINISH · WAITING FOR OFFICIAL MAT READ"
++              : `${nextName.toUpperCase()} · WAITING ${formatElapsedClock(predictedMatOverdueSeconds ?? 0)} FOR OFFICIAL READ`}
+           </Text>
+         </View>
+       ) : null}
+@@ -3027,6 +3121,7 @@ function CompactLiveTimingSummaryContent({
+ }
+ 
+ function CompactRaceProgress({
++  clockIdentity,
+   contest,
+   raceCategory,
+   legLabel,
+@@ -3045,6 +3140,7 @@ function CompactRaceProgress({
+   predictionTrack,
+   waitingToStart = false,
+ }: {
++  clockIdentity?: string;
+   contest: string;
+   raceCategory?: string;
+   legLabel: string;
+@@ -3078,12 +3174,57 @@ function CompactRaceProgress({
+       at: Date.now(),
+     };
+   }
+-  const canonicalElapsedSeconds = parseElapsedClock(elapsedTime);
++  const officialTimelineElapsed = timeline.reduce<number | null>(
++    (latest, split) => {
++      if (split.state !== "completed") return latest;
++      const value = parseElapsedClock(
++        split.elapsedTimeLabel || split.timeLabel,
++      );
++      return value == null ? latest : Math.max(latest ?? 0, value);
++    },
++    null,
++  );
++  const officialSectionElapsed =
++    raceTiming?.sections.reduce<number | null>((latest, section) => {
++      const sectionLatest = section.rows.reduce<number | null>(
++        (rowLatest, row) =>
++          row.overallElapsedSeconds == null
++            ? rowLatest
++            : Math.max(rowLatest ?? 0, row.overallElapsedSeconds),
++        null,
++      );
++      return sectionLatest == null
++        ? latest
++        : Math.max(latest ?? 0, sectionLatest);
++    }, null) ?? null;
++  const startElapsed =
++    clockRunning &&
++    raceStartedAt != null &&
++    Number.isFinite(raceStartedAt) &&
++    Date.now() >= raceStartedAt
++      ? Math.max(0, (Date.now() - raceStartedAt) / 1_000)
++      : null;
++  const canonicalElapsedCandidates = [
++    parseElapsedClock(elapsedTime),
++    officialTimelineElapsed,
++    officialSectionElapsed,
++    predictionTrack?.seed.anchorTimeSec,
++    startElapsed,
++  ].filter(
++    (value): value is number => value != null && Number.isFinite(value),
++  );
++  // Never restart an athlete at zero when a lightweight card is replaced by
++  // full detail. The accepted start, last official row and interpolation seed
++  // are all lower bounds for the same race clock.
++  const canonicalElapsedSeconds = canonicalElapsedCandidates.length
++    ? Math.max(...canonicalElapsedCandidates)
++    : null;
+   const { elapsedSeconds: continuousElapsedSeconds, nowMs: predictionNow } =
+     useContinuousElapsedSeconds({
+       running: clockRunning,
+       raceStartedAt,
+       canonicalElapsedSeconds,
++      identityKey: clockIdentity,
+     });
+   const cutoffUpdatePending = isLiveTimingAwaitingCutoffUpdate({
+     detail: {
+@@ -3167,6 +3308,19 @@ function CompactRaceProgress({
+     value: "",
+     state: "upcoming" as const,
+   }));
++  const transitionStageReached = (stage: string) => {
++    if (stage !== "T1" && stage !== "T2") return true;
++    const canonical = raceTiming?.sections.find((section) => {
++      const identity = normalizeSearchText(
++        `${section.shortLabel ?? ""} ${section.id} ${section.title}`,
++      );
++      return identity.split(" ").includes(stage.toLowerCase());
++    });
++    if (canonical?.status === "in_progress" || canonical?.status === "completed")
++      return true;
++    if (normalizedLeg.split(" ").includes(stage.toLowerCase())) return true;
++    return transitionTimeLabelForStage(timeline, stage) != null;
++  };
+   const isDnf = /\bdnf\b|did not finish/i.test(resultStatus ?? "");
+   const isDns = /\bdns\b|did not start/i.test(resultStatus ?? "");
+   const sportStages = stages.filter((stage) =>
+@@ -3312,7 +3466,11 @@ function CompactRaceProgress({
+   const raceElapsedSeconds = continuousElapsedSeconds;
+   const splitTimeForStage = (stage: string): string => {
+     if (cutoffUpdatePending) return "--:--";
+-    if (stage === "FINISH" || (finished && stage === "RACE"))
++    // Never let fuzzy split matching populate a finish boundary before the
++    // canonical participant has official finish evidence.
++    if (/\bfinish\b/i.test(stage))
++      return finished ? displayElapsedClock(finishTime) || "--:--" : "--:--";
++    if (finished && stage === "RACE")
+       return displayElapsedClock(finishTime) || "--:--";
+     if (stage === "START") {
+       const start = resultSplits.find((split) => /\bstart\b/i.test(split.label))
+@@ -3320,15 +3478,24 @@ function CompactRaceProgress({
+       return start ? "00:00:00" : "--:--";
+     }
+     if (stage === "T1" || stage === "T2") {
++      const liveTransitionDuration = liveTransitionElapsedSeconds(
++        raceTiming,
++        stage,
++        predictionNow,
++      );
++      if (liveTransitionDuration != null)
++        return formatElapsedClock(liveTransitionDuration);
+       const transitionDuration = transitionDurationForStage(raceTiming, stage);
+       if (transitionDuration != null)
+         return formatElapsedClock(transitionDuration);
+     }
+     const aliases: Record<string, string[]> = {
+       SWIM: ["swim"],
+-      T1: ["t1", "transition 1", "transition1"],
++      // Feibot publishes transition duration on the row that opens the next
++      // sport rather than emitting a separate T1/T2 timing row.
++      T1: ["t1", "transition 1", "transition1", "bike start"],
+       BIKE: ["bike", "cycle"],
+-      T2: ["t2", "transition 2", "transition2"],
++      T2: ["t2", "transition 2", "transition2", "run start"],
+       RUN: ["run"],
+     };
+     const match = resultSplits.find((split) => {
+@@ -3354,6 +3521,7 @@ function CompactRaceProgress({
+       (/^(?:T1|T2)$/.test(stage) ? completedTimelineRows.at(-1) : undefined);
+     const officialStageTime =
+       displayElapsedClock(match?.value) ||
++      transitionTimeLabelForStage(timeline, stage) ||
+       displayElapsedClock(
+         completedTimelineMatch?.elapsedTimeLabel ||
+           completedTimelineMatch?.timeLabel,
+@@ -3663,6 +3831,7 @@ function CompactRaceProgress({
+         ) : null}
+         {displayStages.map((displayStage, index) => {
+           const stage = displayStage.label;
++          const stageVisible = transitionStageReached(stage);
+           const segmentProgress =
+             index < displayStages.length - 1
+               ? Math.max(
+@@ -3701,7 +3870,18 @@ function CompactRaceProgress({
+           return (
+             <View
+               key={displayStage.key}
+-              style={{ flex: 1, minWidth: 0, alignItems: "center", gap: 6 }}
++              pointerEvents={stageVisible ? "auto" : "none"}
++              accessibilityElementsHidden={!stageVisible}
++              importantForAccessibility={
++                stageVisible ? "auto" : "no-hide-descendants"
++              }
++              style={{
++                flex: 1,
++                minWidth: 0,
++                alignItems: "center",
++                gap: 6,
++                opacity: stageVisible ? 1 : 0,
++              }}
+             >
+               <Text
+                 variant="caption"
+@@ -3871,7 +4051,7 @@ function TrackedAthleteListCard({
+     : "";
+   const predictionAnchorRef = useRef({ fingerprint: "", at: Date.now() });
+   const predictionRunning = Boolean(
+-    row.detail?.track && row.detail?.header.status === "live",
++    row.detail?.track && isDetailClockRunning(row.detail),
+   );
+   const predictionNow = useSharedLiveNow(predictionRunning);
+   if (predictionAnchorRef.current.fingerprint !== predictionFingerprint) {
+@@ -4013,6 +4193,7 @@ function TrackedAthleteListCard({
+               />
+             ) : null}
+             <CompactRaceProgress
++              clockIdentity={stableAthleteKey(row.athlete, row.athlete.id)}
+               contest={contest || ""}
+               raceCategory={row.raceCategory || row.detail?.header.raceCategory}
+               legLabel={progress?.legLabel || status}
+@@ -4037,9 +4218,7 @@ function TrackedAthleteListCard({
+                 metricValue(row.detail?.liveStats, "Elapsed") ||
+                 metricValue(row.detail?.liveStats, "Athlete Race Time")
+               }
+-              clockRunning={Boolean(
+-                !finished && row.detail?.header.status === "live",
+-              )}
++              clockRunning={isDetailClockRunning(row.detail)}
+               cutoffs={row.cutoffs}
+               cutoffRows={row.detail?.cutoffs}
+               raceStartedAt={row.detail?.raceStartedAt}
+@@ -4330,6 +4509,9 @@ export function LiveTrackScreen() {
+       !hasLocalSearchMatch,
+     athleteDataSource,
+   );
++  const trackerLoading = eventQuery.isLoading && !eventQuery.event;
++  const trackerSlow = useSlowNetwork(trackerLoading);
++  const searchSlow = useSlowNetwork(athleteSearch.isFetching);
+   const registeredAthleteBib = firstText(autoTrackAthlete?.bib);
+   const registeredAthleteSearch = useAthleteSearch(
+     id,
+@@ -4399,14 +4581,25 @@ export function LiveTrackScreen() {
+ 
+   const trackedForEvent = useMemo(() => {
+     if (!athleteInteractionsEnabled) return [];
+-    const seen = new Set<string>();
+-    return watchlistAthletes.filter((athlete) => {
+-      if (athlete.eventId && athlete.eventId !== id) return false;
+-      const key = stableAthleteKey(athlete, id);
+-      if (!key || seen.has(key)) return false;
+-      seen.add(key);
+-      return true;
+-    });
++    return watchlistAthletes.reduce<ScreenTrackedAthlete[]>((unique, athlete) => {
++      if (athlete.eventId && athlete.eventId !== id) return unique;
++      const existingIndex = unique.findIndex(
++        (existing) =>
++          sameAthleteIdentity(existing, athlete) ||
++          stableAthleteKey(existing, id) === stableAthleteKey(athlete, id),
++      );
++      if (existingIndex < 0) {
++        unique.push(athlete);
++        return unique;
++      }
++      const existing = unique[existingIndex];
++      unique[existingIndex] = Object.fromEntries(
++        Object.entries({ ...athlete, ...existing }).filter(
++          ([, value]) => value !== undefined && value !== null && value !== "",
++        ),
++      ) as ScreenTrackedAthlete;
++      return unique;
++    }, []);
+   }, [id, athleteInteractionsEnabled, watchlistAthletes]);
+ 
+   const trackedResultIndex = useCallback(
+@@ -4517,35 +4710,23 @@ export function LiveTrackScreen() {
+       ? requestedTrackedIndex
+       : Math.min(selectedTrackedIndex, trackedForEvent.length - 1)
+     : 0;
+-  const mapAthlete =
+-    requestedTrackedIndex >= 0
+-      ? trackedForEvent[requestedTrackedIndex]
+-      : undefined;
+-  const geometryQuery = useCourseGeometry(id, eventQuery.event?.raw, true, {
+-    ticketId: mapAthlete?.ticketId,
+-    contestId:
+-      mapAthlete?.providerContestUuid ??
+-      mapAthlete?.contestUuid ??
+-      mapAthlete?.contestId,
+-    contestName: mapAthlete?.category,
+-  });
++  // The Track tab is map-first: load the event's default course even before
++  // the user follows or selects an athlete. Athlete selection must never swap
++  // or refit the base course: only the marker overlay changes.
++  const geometryQuery = useCourseGeometry(
++    id,
++    eventQuery.event?.raw,
++    eventScreen.queryEnabled,
++  );
+   const courseMap = useMemo(
+     () =>
+       mapCourseMap(
+         courseQuery.data?.courseIndex,
+         geometryQuery.data ?? undefined,
+-        mapAthlete
+-          ? {
+-              id:
+-                mapAthlete.providerContestUuid ??
+-                mapAthlete.contestUuid ??
+-                mapAthlete.contestId,
+-              name: mapAthlete.category,
+-            }
+-          : undefined,
++        undefined,
+         courseQuery.data?.timingConfiguration,
+       ),
+-    [courseQuery.data, geometryQuery.data, mapAthlete],
++    [courseQuery.data, geometryQuery.data],
+   );
+   const hasElevationCourse = Boolean(
+     courseMap?.legs.some((leg) => /bike|run/i.test(leg.segment)),
+@@ -4584,8 +4765,7 @@ export function LiveTrackScreen() {
+         enabled: Boolean(
+           eventScreen.queryEnabled &&
+             athleteInteractionsEnabled &&
+-            hasIdentity &&
+-            isSelectedAthlete,
++            hasIdentity,
+         ),
+         placeholderData: {
+           success: true,
+@@ -4941,7 +5121,13 @@ export function LiveTrackScreen() {
+     liveTickMs: 1_000,
+   });
+   const trackAnchorClocksRef = useRef(
+-    new Map<string, { fingerprint: string; clockSec: number }>(),
++    new Map<
++      string,
++      { fingerprint: string; clockSec: number; elapsedSec: number }
++    >(),
++  );
++  const gpsCourseSnapCacheRef = useRef(
++    new Map<string, { source: string; position: { lat: number; lng: number } }>(),
+   );
+   const selectedAthleteRefetch =
+     requestedTrackedIndex >= 0
+@@ -5040,36 +5226,25 @@ export function LiveTrackScreen() {
+       detail: AthleteDetailViewModel | undefined,
+       estimatedCourseDistanceKm: number,
+     ) => {
+-      const legKey = String(detail?.track?.currentLeg || "").toLowerCase();
+-      const legTotal = Number(detail?.track?.currentLegDistanceKm);
+-      if (!legKey || !(legTotal > 0) || !detail?.track) return undefined;
+-      const configuredLegStartKm = Math.max(
+-        0,
+-        detail.track.seed.nextKm - legTotal,
+-      );
+-      const canonicalLegDistance = Number(detail.track.estimatedLegDistanceKm);
++      const progress = mapLegProgress(detail?.raceTiming, detail?.track?.currentLeg);
++      const legKey = progress.sport;
++      if (!legKey) return undefined;
++      const entry = legPaths.find(({ leg }) => mapSport(leg.segment) === legKey);
++      if (!entry) return undefined;
++      const legTotal = progress.totalKm || Number(detail?.track?.currentLegDistanceKm) || entry.leg.distanceKm || 0;
++      const configuredLegStartKm = progress.startKm;
++      const canonicalLegDistance = Number(detail?.track?.estimatedLegDistanceKm);
+       const legDistance = Math.max(
++        progress.officialKm,
+         Number.isFinite(canonicalLegDistance) ? canonicalLegDistance : 0,
+-        estimatedCourseDistanceKm - configuredLegStartKm,
++        configuredLegStartKm != null ? estimatedCourseDistanceKm - configuredLegStartKm : 0,
+       );
+-      const entry = legPaths.find(({ leg }) => {
+-        const segment = String(leg.segment || "").toLowerCase();
+-        return (
+-          segment === legKey ||
+-          segment.includes(legKey) ||
+-          legKey.includes(segment)
+-        );
+-      });
+-      return entry
+-        ? positionAtFraction(
+-            entry.path,
+-            Math.min(1, Math.max(0, legDistance / legTotal)),
+-          )
+-        : undefined;
++      return positionAtFraction(entry.path,
++        progress.atEnd ? 1 : legTotal > 0 ? Math.min(1, Math.max(0, legDistance / legTotal)) : 0);
+     };
+     // The ref-backed cache intentionally persists split fingerprints between
+     // renders so each new official timing read resets interpolation once.
+-    return watchedRows.flatMap(({ athlete, detail }) => {
++    const markers = watchedRows.flatMap<TrackAthlete>(({ athlete, detail }) => {
+       const stableId = stableAthleteKey(athlete, id);
+       const isFinished =
+         detail?.header.status === "finished" ||
+@@ -5098,28 +5273,38 @@ export function LiveTrackScreen() {
+         ].join(":");
+         const previous = trackAnchorClocksRef.current.get(stableId);
+         if (!previous || previous.fingerprint !== fingerprint) {
++          const metricElapsedSeconds =
++            parseElapsedClock(metricValue(detail.liveStats, "Elapsed")) ??
++            parseElapsedClock(
++              metricValue(detail.liveStats, "Athlete Race Time"),
++            );
++          const startedElapsedSeconds =
++            detail.raceStartedAt != null &&
++            Number.isFinite(detail.raceStartedAt) &&
++            Date.now() >= detail.raceStartedAt
++              ? (Date.now() - detail.raceStartedAt) / 1_000
++              : null;
+           trackAnchorClocksRef.current.set(stableId, {
+             fingerprint,
+             clockSec: liveMapClockSec,
++            elapsedSec: Math.max(
++              detail.track.seed.anchorTimeSec,
++              metricElapsedSeconds ?? 0,
++              startedElapsedSeconds ?? 0,
++            ),
+           });
+         }
+-        const anchorClock =
+-          trackAnchorClocksRef.current.get(stableId)?.clockSec ??
+-          liveMapClockSec;
++        const interpolationAnchor = trackAnchorClocksRef.current.get(stableId);
++        const anchorClock = interpolationAnchor?.clockSec ?? liveMapClockSec;
+         // A tracked athlete can be opened well after their last timing read.
+         // Seed movement from the canonical elapsed race clock, then continue
+         // smoothly every second until the next official read re-anchors it.
+-        const canonicalElapsedSeconds =
+-          parseElapsedClock(metricValue(detail.liveStats, "Elapsed")) ??
+-          parseElapsedClock(metricValue(detail.liveStats, "Athlete Race Time"));
+-        const elapsedSinceRead =
+-          canonicalElapsedSeconds != null
+-            ? Math.max(
+-                0,
+-                canonicalElapsedSeconds - detail.track.seed.anchorTimeSec +
+-                  (liveMapClockSec - anchorClock),
+-              )
+-            : Math.max(0, liveMapClockSec - anchorClock);
++        const elapsedSinceRead = Math.max(
++          0,
++          (interpolationAnchor?.elapsedSec ?? detail.track.seed.anchorTimeSec) -
++            detail.track.seed.anchorTimeSec +
++            (liveMapClockSec - anchorClock),
++        );
+         const latestOfficialKm = detail.track.keyframes.reduce(
+           (max, keyframe) => Math.max(max, keyframe.distanceKm),
+           detail.track.seed.anchorKm,
+@@ -5136,8 +5321,44 @@ export function LiveTrackScreen() {
+         !resultsMode && detail?.liveLocationSource === "GPS"
+           ? detail.liveLocation
+           : undefined;
++      const gpsLegKey = mapLegProgress(detail?.raceTiming, detail?.track?.currentLeg).sport;
++      const gpsCoursePath =
++        legPaths.find(({ leg }) => {
++          return gpsLegKey && mapSport(leg.segment) === gpsLegKey;
++        })?.leg.path ?? courseMap.mergedPath;
++      let courseSnappedGps: { lat: number; lng: number } | undefined;
++      if (directGpsPosition) {
++        const courseStart = gpsCoursePath[0];
++        const courseEnd = gpsCoursePath.at(-1);
++        const source = [
++          directGpsPosition.lat.toFixed(7),
++          directGpsPosition.lng.toFixed(7),
++          courseMap.name,
++          gpsLegKey,
++          gpsCoursePath.length,
++          courseStart?.lat.toFixed(6),
++          courseStart?.lng.toFixed(6),
++          courseEnd?.lat.toFixed(6),
++          courseEnd?.lng.toFixed(6),
++        ].join(":");
++        const cached = gpsCourseSnapCacheRef.current.get(stableId);
++        if (cached?.source === source) {
++          courseSnappedGps = cached.position;
++        } else {
++          courseSnappedGps = nearestPositionOnPath(
++            gpsCoursePath,
++            directGpsPosition,
++          );
++          if (courseSnappedGps) {
++            gpsCourseSnapCacheRef.current.set(stableId, {
++              source,
++              position: courseSnappedGps,
++            });
++          }
++        }
++      }
+       const position =
+-        directGpsPosition ??
++        courseSnappedGps ??
+         positionOnCurrentLeg(detail, estimatedCourseDistanceKm) ??
+         positionOnConfiguredCourse(
+           estimatedCourseDistanceKm,
+@@ -5158,7 +5379,7 @@ export function LiveTrackScreen() {
+           isPending,
+           progressFraction,
+           status: detail?.header.status,
+-          currentLeg: detail?.raceProgress?.legLabel,
++          currentLeg: gpsLegKey || detail?.raceProgress?.legLabel,
+           estimatedDistanceKm: estimatedCourseDistanceKm,
+           totalDistanceKm: detail?.track?.totalKm,
+           lastOfficialLabel: detail?.track
+@@ -5179,6 +5400,40 @@ export function LiveTrackScreen() {
+         },
+       ];
+     });
++    return markers.reduce<TrackAthlete[]>((unique, marker) => {
++      const markerBib = normalizeBib(marker.bib);
++      const markerName = normalizeSearchText(marker.name);
++      const existingIndex = unique.findIndex((existing) => {
++        const exactIdentity =
++          (marker.id && existing.id === marker.id) ||
++          (markerBib && normalizeBib(existing.bib) === markerBib);
++        if (exactIdentity) return true;
++        // Historical watchlist rows can survive a provider relink with a new
++        // bib/UUID. When one of two same-name markers is the active carousel
++        // athlete, treat them as the same display athlete and keep only the
++        // most advanced course position.
++        return Boolean(
++          markerName &&
++            markerName === normalizeSearchText(existing.name) &&
++            (marker.selected || existing.selected),
++        );
++      });
++      if (existingIndex < 0) {
++        unique.push(marker);
++        return unique;
++      }
++      const existing = unique[existingIndex];
++      const markerDistance = Number(marker.estimatedDistanceKm) || 0;
++      const existingDistance = Number(existing.estimatedDistanceKm) || 0;
++      const preferred = markerDistance >= existingDistance ? marker : existing;
++      const fallback = preferred === marker ? existing : marker;
++      unique[existingIndex] = {
++        ...fallback,
++        ...preferred,
++        selected: Boolean(existing.selected || marker.selected),
++      };
++      return unique;
++    }, []);
+   }, [
+     courseMap,
+     id,
+@@ -5221,14 +5476,16 @@ export function LiveTrackScreen() {
+       );
+     if (configuredDistances.length === 0) return null;
+     const legStartKm = Math.min(...configuredDistances);
++    const legEndKm = Math.max(...configuredDistances);
+     return {
+       routeSegment,
+-      // Both map and elevation use the same continuously interpolated course
+-      // distance. Shared zero-distance boundaries still stop at the mat.
++      // Convert the map's continuously interpolated course distance to a
++      // leg-local distance. The last official read must not cap this marker,
++      // otherwise elevation lags behind the live prediction.
+       distanceKm: Math.max(
+         0,
+         Math.min(
+-          Number(detail.track.currentLegDistanceKm) || Number.POSITIVE_INFINITY,
++          Math.max(0, legEndKm - legStartKm),
+           Number(selectedMapAthlete.estimatedDistanceKm || 0) - legStartKm,
+         ),
+       ),
+@@ -5602,7 +5859,16 @@ export function LiveTrackScreen() {
+               </Card>
+             ) : null}
+ 
+-            {!resultsMode &&
++            {trackerLoading ? (
++              <View style={{ minHeight: 120, gap: theme.spacing.sm }}>
++                <Skeleton height={88} radius={theme.radius.large} />
++                <Text variant="bodySmall" color="textMuted">
++                  {trackerSlow
++                    ? "Slow connection detected. Live tracking is still loading."
++                    : "Loading live tracking…"}
++                </Text>
++              </View>
++            ) : !resultsMode &&
+             liveTrackingResolved &&
+             !publicAthleteVisibilityEnabled ? (
+               <EmptyState
+@@ -5618,9 +5884,14 @@ export function LiveTrackScreen() {
+               <View style={{ gap: theme.spacing.sm }}>
+                 <View style={{ minHeight: 96, gap: theme.spacing.sm }}>
+                   {athleteSearch.isFetching ? (
+-                    <Text variant="bodySmall" color="textMuted">
+-                      Searching...
+-                    </Text>
++                    <View style={{ gap: theme.spacing.sm }}>
++                      <Skeleton height={72} radius={theme.radius.large} />
++                      <Text variant="bodySmall" color="textMuted">
++                        {searchSlow
++                          ? "Slow connection detected. Athlete search is still loading."
++                          : "Searching athletes…"}
++                      </Text>
++                    </View>
+                   ) : null}
+                   {visibleSearchResults.length > 0 ? (
+                     visibleSearchResults.slice(0, 8).map((athlete) => {
+diff --git a/src/features/events/components/live-track-all-markers-contract.test.ts b/src/features/events/components/live-track-all-markers-contract.test.ts
+index b803e87..abce7f9 100644
+--- a/src/features/events/components/live-track-all-markers-contract.test.ts
++++ b/src/features/events/components/live-track-all-markers-contract.test.ts
+@@ -67,6 +67,25 @@ test("map interpolation begins from the athlete's canonical elapsed race time",
+   assert.match(screenSource, /liveMapClockSec - anchorClock/);
+ });
+ 
++test("elevation uses predicted course distance without an official-read cap", () => {
++  assert.match(screenSource, /legEndKm - legStartKm/);
++  const elevationBlock = screenSource.slice(
++    screenSource.indexOf("const elevationAthlete"),
++    screenSource.indexOf("const elevationAthlete") + 3_500,
++  );
++  assert.doesNotMatch(
++    elevationBlock,
++    /Number\(detail\.track\.currentLegDistanceKm\)/,
++  );
++});
++
++test("unfinished finish boundaries never display a fuzzy split value", () => {
++  assert.match(
++    screenSource,
++    /if \(\/\\bfinish\\b\/i\.test\(stage\)\)\s*return finished \? displayElapsedClock\(finishTime\)/,
++  );
++});
++
+ test("the selected athlete has a compact bottom map card", () => {
+   assert.match(screenSource, /function CompactMapAthleteCard/);
+   assert.match(screenSource, /Live Elapsed/);
+@@ -77,3 +96,22 @@ test("the selected athlete has a compact bottom map card", () => {
+     /sheetMode === "collapsed" &&\s*selectedTrackedRow &&\s*!compactCardDismissed/,
+   );
+ });
++
++test("a relinked selected athlete keeps one marker at the furthest course position", () => {
++  assert.match(
++    screenSource,
++    /markerName === normalizeSearchText\(existing\.name\)/,
++  );
++  assert.match(
++    screenSource,
++    /markerDistance >= existingDistance \? marker : existing/,
++  );
++});
++
++test("an active transition shows its running elapsed duration", () => {
++  assert.match(screenSource, /liveTransitionElapsedSeconds\(/);
++  assert.match(
++    screenSource,
++    /if \(liveTransitionDuration != null\)\s*return formatElapsedClock\(liveTransitionDuration\)/,
++  );
++});
+diff --git a/src/features/events/components/live-track-map-search.contract.test.ts b/src/features/events/components/live-track-map-search.contract.test.ts
+new file mode 100644
+index 0000000..e816580
+--- /dev/null
++++ b/src/features/events/components/live-track-map-search.contract.test.ts
+@@ -0,0 +1,67 @@
++import assert from "node:assert/strict";
++import { readFileSync } from "node:fs";
++import test from "node:test";
++
++const trackSource = readFileSync(
++  new URL("./LiveTrackScreen.tsx", import.meta.url),
++  "utf8",
++);
++const sheetSource = readFileSync(
++  new URL("../../../shared/components/ui/BottomSheet.tsx", import.meta.url),
++  "utf8",
++);
++
++test("the map loads event geometry before an athlete is selected", () => {
++  assert.match(
++    trackSource,
++    /useCourseGeometry\(\s*id,\s*eventQuery\.event\?\.raw,\s*eventScreen\.queryEnabled/,
++  );
++  assert.doesNotMatch(
++    trackSource,
++    /useCourseGeometry\(id, eventQuery\.event\?\.raw, Boolean\(mapAthlete\)/,
++  );
++  assert.doesNotMatch(trackSource, /const mapAthlete =/);
++  assert.match(trackSource, /Athlete selection must never swap/);
++});
++
++test("every tracked athlete receives an initial detail request for map position", () => {
++  assert.match(trackSource, /athleteInteractionsEnabled\s*&&\s*hasIdentity/);
++  assert.doesNotMatch(
++    trackSource,
++    /athleteInteractionsEnabled\s*&&\s*hasIdentity\s*&&\s*isSelectedAthlete/,
++  );
++});
++
++test("the bottom-sheet gesture remains stable while typing search text", () => {
++  assert.match(sheetSource, /const pan = useMemo\(/);
++  assert.doesNotMatch(sheetSource, /const pan = Gesture\.Pan\(\)/);
++});
++
++test("T1 and T2 appear only after the athlete reaches the transition", () => {
++  assert.match(trackSource, /stage === "T1" \|\| stage === "T2"/);
++  assert.match(trackSource, /const transitionStageReached =/);
++  assert.match(trackSource, /canonical\?\.status === "in_progress"/);
++  assert.match(trackSource, /opacity: stageVisible \? 1 : 0/);
++});
++
++test("the Finish stage never displays a live elapsed value before finishing", () => {
++  assert.match(
++    trackSource,
++    /if \(stage === "FINISH"\)[\s\S]{0,120}return finished \? displayElapsedClock\(finishTime\)/,
++  );
++});
++
++test("switching or re-adding an athlete preserves the live elapsed clock", () => {
++  assert.match(trackSource, /const elapsedClockCache = new Map/);
++  assert.match(trackSource, /elapsedClockCache\.get\(identityKey\)/);
++  assert.match(
++    trackSource,
++    /startElapsedSeconds != null\s*\? startElapsedSeconds/,
++  );
++  assert.match(trackSource, /function isDetailClockRunning/);
++  assert.match(trackSource, /detail\.startTiming\.hasAcceptedStart === true/);
++  assert.doesNotMatch(
++    trackSource,
++    /clockRunning=\{Boolean\([\s\S]{0,100}header\.status === "live"/,
++  );
++});
+diff --git a/src/features/tracking/athlete-detail/components/AthleteDetailScreen.tsx b/src/features/tracking/athlete-detail/components/AthleteDetailScreen.tsx
+index 954d83c..02a8a08 100644
+--- a/src/features/tracking/athlete-detail/components/AthleteDetailScreen.tsx
++++ b/src/features/tracking/athlete-detail/components/AthleteDetailScreen.tsx
+@@ -145,7 +145,13 @@ function resultSplitMetric(
+     const name = normalizedResultToken(leg.name).replace(/\s/g, '');
+     return Boolean((type && key.includes(type)) || (name && key.includes(name)));
+   });
+-  if (key.includes("transition") || key === "t1" || key === "t2") {
++  if (
++    key.includes("transition") ||
++    key === "t1" ||
++    key === "t2" ||
++    key === "start" ||
++    key.endsWith("start")
++  ) {
+     return undefined;
+   }
+   if (key.includes("swim")) {
+diff --git a/src/features/tracking/athlete-detail/components/cards/PredictionCard.tsx b/src/features/tracking/athlete-detail/components/cards/PredictionCard.tsx
+index 571da24..3a415f0 100644
+--- a/src/features/tracking/athlete-detail/components/cards/PredictionCard.tsx
++++ b/src/features/tracking/athlete-detail/components/cards/PredictionCard.tsx
+@@ -4,6 +4,8 @@ import { useTheme } from '@/core/theme';
+ import { Text } from '@/shared/components';
+ import type { NextSplitView, PredictedCheckpointView, ProjectedFinishView } from '@/features/tracking/mappers';
+ import { resolvePredictionTimeLabels } from '@/features/tracking/timing/predictionPresentation';
++import { useSharedLiveNow } from '@/features/tracking/timing/sharedLiveClock';
++import type { TimelineSplit } from '@/features/tracking/mappers';
+ 
+ import { SectionCard, TileGrid } from './primitives';
+ 
+@@ -15,13 +17,41 @@ export function PredictionCard({
+   nextSplit,
+   projected,
+   checkpoints = [],
++  timeline = [],
++  raceStartedAt,
++  clockRunning = false,
++  noFinishTime = false,
+ }: {
+   nextSplit?: NextSplitView;
+   projected?: ProjectedFinishView;
+   checkpoints?: PredictedCheckpointView[];
++  timeline?: TimelineSplit[];
++  raceStartedAt?: number;
++  clockRunning?: boolean;
++  noFinishTime?: boolean;
+ }) {
+   const theme = useTheme();
+-  if (!nextSplit && !projected && checkpoints.length === 0) return null;
++  const nowMs = useSharedLiveNow(clockRunning && raceStartedAt != null);
++  if (!nextSplit && !projected && checkpoints.length === 0 && !noFinishTime) return null;
++  const parseDuration = (value?: string) => {
++    const parts = String(value ?? '').trim().split(':').map(Number);
++    if (parts.length !== 3 || parts.some((part) => !Number.isFinite(part))) return null;
++    return parts[0] * 3600 + parts[1] * 60 + parts[2];
++  };
++  const formatDuration = (seconds: number) => {
++    const safe = Math.max(0, Math.floor(seconds));
++    const hours = Math.floor(safe / 3600);
++    const minutes = Math.floor((safe % 3600) / 60);
++    const remainder = safe % 60;
++    return [hours, minutes, remainder].map((part) => String(part).padStart(2, '0')).join(':');
++  };
++  const raceElapsedSeconds =
++    raceStartedAt != null && Number.isFinite(raceStartedAt) && nowMs >= raceStartedAt
++      ? Math.max(0, Math.floor((nowMs - raceStartedAt) / 1_000))
++      : null;
++  const lastConfirmed = [...timeline]
++    .reverse()
++    .find((row) => row.state === 'completed' && !/^start$/i.test(row.splitLabel || row.name));
+   const nextSplitTimes = resolvePredictionTimeLabels({
+     etaClock: nextSplit?.etaClock,
+     etaElapsed: nextSplit?.etaElapsed,
+@@ -64,6 +94,29 @@ export function PredictionCard({
+ 
+   return (
+     <SectionCard title="Prediction" titleColor="statusUpcoming">
++      {noFinishTime ? (
++        <View style={{ gap: 4 }}>
++          <Text variant="headline" color="accent" style={{ fontWeight: '900' }}>
++            NO FINISH TIME
++          </Text>
++          <Text variant="bodySmall" color="textMuted">
++            The configured cutoff expired before the required timing mat was crossed.
++          </Text>
++        </View>
++      ) : null}
++
++      {lastConfirmed ? (
++        <View style={{ gap: 4 }}>
++          <Text variant="caption" color="textMuted">LAST CONFIRMED</Text>
++          <Text variant="bodySmall" style={{ fontWeight: '900' }}>
++            {lastConfirmed.splitLabel || lastConfirmed.name} · {lastConfirmed.elapsedTimeLabel || lastConfirmed.timeLabel}
++          </Text>
++          {lastConfirmed.timeOfDayLabel ? (
++            <Text variant="caption" color="textMuted">Actual crossing {lastConfirmed.timeOfDayLabel}</Text>
++          ) : null}
++        </View>
++      ) : null}
++
+       {nextItems.length > 0 ? (
+         <View style={{ gap: theme.spacing.sm }}>
+           <Text variant="caption" color="textMuted">
+@@ -92,7 +145,14 @@ export function PredictionCard({
+           <Text variant="caption" color="textMuted">
+             ESTIMATED TIMES (PREDICTED)
+           </Text>
+-          {checkpoints.map((checkpoint) => (
++          {checkpoints.map((checkpoint) => {
++            const etaElapsedSeconds = parseDuration(checkpoint.etaElapsed);
++            const deltaSeconds =
++              raceElapsedSeconds != null && etaElapsedSeconds != null
++                ? etaElapsedSeconds - raceElapsedSeconds
++                : null;
++            const overdue = deltaSeconds != null && deltaSeconds <= 0;
++            return (
+             <View
+               key={`${checkpoint.checkpoint}-${checkpoint.etaElapsed}`}
+               style={{
+@@ -114,14 +174,19 @@ export function PredictionCard({
+               </View>
+               <View style={{ alignItems: 'flex-end' }}>
+                 <Text variant="bodySmall" color="statusUpcoming" style={{ fontWeight: '900' }}>
+-                  {checkpoint.etaElapsed}
++                  {overdue
++                    ? `Waiting ${formatDuration(Math.abs(deltaSeconds))}`
++                    : deltaSeconds != null
++                      ? `ETA in ${formatDuration(deltaSeconds)}`
++                      : checkpoint.etaElapsed}
+                 </Text>
+                 <Text variant="caption" color="textMuted">
+-                  {checkpoint.etaClock}
++                  {overdue ? `Overdue since ${checkpoint.etaClock}` : checkpoint.etaClock}
+                 </Text>
+               </View>
+             </View>
+-          ))}
++            );
++          })}
+           <Text variant="caption" color="textMuted">
+             Estimated between official timing points. It updates after every official read.
+           </Text>
+diff --git a/src/features/tracking/athlete-detail/components/cards/RaceProgressCard.tsx b/src/features/tracking/athlete-detail/components/cards/RaceProgressCard.tsx
+index 33ea245..62c3e11 100644
+--- a/src/features/tracking/athlete-detail/components/cards/RaceProgressCard.tsx
++++ b/src/features/tracking/athlete-detail/components/cards/RaceProgressCard.tsx
+@@ -21,6 +21,7 @@ import {
+ } from "@/features/tracking/courseKind";
+ import {
+   formatDuration,
++  transitionTimeLabelForStage,
+   type AthleteRaceTiming,
+ } from "@/features/tracking/timing";
+ 
+@@ -274,17 +275,23 @@ export function RaceProgressCard({
+   const theme = useTheme();
+   const stages = useMemo(() => {
+     if (raceTiming?.sections.length) {
+-      return raceTiming.sections.map((section) => ({
+-        label: section.shortLabel ?? section.title,
+-        icon: stageIcon(section.legType ?? section.shortLabel ?? section.title),
+-        color: stageColor(section.legType ?? section.shortLabel ?? section.title),
+-        state: section.status === "completed"
+-          ? "completed" as const
+-          : section.status === "in_progress"
+-            ? "current" as const
+-            : "upcoming" as const,
+-        timeLabel: formatDuration(section.durationSeconds),
+-      }));
++      return raceTiming.sections.map((section) => {
++        const label = section.shortLabel ?? section.title;
++        const transitionTime = transitionTimeLabelForStage(timeline, label);
++        return {
++          label,
++          icon: stageIcon(section.legType ?? label),
++          color: stageColor(section.legType ?? label),
++          state: section.status === "completed"
++            ? "completed" as const
++            : section.status === "in_progress"
++              ? "current" as const
++              : "upcoming" as const,
++          timeLabel: section.durationSeconds == null && transitionTime
++            ? transitionTime
++            : formatDuration(section.durationSeconds),
++        };
++      });
+     }
+     if (timeline.length <= 1) return buildStages(progress);
+     return timeline.map((split) => ({
+diff --git a/src/features/tracking/course-map/components/CourseMapView.native.tsx b/src/features/tracking/course-map/components/CourseMapView.native.tsx
+index 492400a..fc86e15 100644
+--- a/src/features/tracking/course-map/components/CourseMapView.native.tsx
++++ b/src/features/tracking/course-map/components/CourseMapView.native.tsx
+@@ -171,39 +171,6 @@ function nearestPathWindow(
+ 
+ type MapAthlete = NonNullable<CourseMapViewProps["athletes"]>[number];
+ 
+-function spreadOverlappingAthlete(
+-  athletes: MapAthlete[],
+-  athlete: MapAthlete,
+-  index: number,
+-): MapAthlete {
+-  const positionKey = `${athlete.position.lat.toFixed(5)}:${athlete.position.lng.toFixed(5)}`;
+-  const cluster = athletes
+-    .map((candidate, candidateIndex) => ({ candidate, candidateIndex }))
+-    .filter(
+-      ({ candidate }) =>
+-        `${candidate.position.lat.toFixed(5)}:${candidate.position.lng.toFixed(5)}` ===
+-        positionKey,
+-    );
+-  if (cluster.length < 2) return athlete;
+-  const clusterIndex = cluster.findIndex(
+-    ({ candidateIndex }) => candidateIndex === index,
+-  );
+-  if (clusterIndex < 0) return athlete;
+-  const angle = (2 * Math.PI * clusterIndex) / cluster.length - Math.PI / 2;
+-  const radius = 0.00028 * (1 + Math.floor(clusterIndex / 8));
+-  const longitudeScale = Math.max(
+-    0.35,
+-    Math.cos((athlete.position.lat * Math.PI) / 180),
+-  );
+-  return {
+-    ...athlete,
+-    position: {
+-      lat: athlete.position.lat + Math.sin(angle) * radius,
+-      lng: athlete.position.lng + (Math.cos(angle) * radius) / longitudeScale,
+-    },
+-  };
+-}
+-
+ function athleteMarkerDescription(athlete: MapAthlete): string {
+   return [
+     athlete.bib ? `Bib ${athlete.bib}` : null,
+@@ -289,7 +256,7 @@ function AthleteMarkerBody({
+   );
+ }
+ 
+-function AnimatedSelectedAthleteMarker({
++function AnimatedAthleteMarker({
+   athlete,
+   showLabel,
+   onPress,
+@@ -326,12 +293,19 @@ function AnimatedSelectedAthleteMarker({
+     setTracksViewChanges(true);
+     const timer = setTimeout(() => setTracksViewChanges(false), 900);
+     return () => clearTimeout(timer);
+-  }, [athlete.bib, athlete.name, athlete.photoUrl, showLabel]);
++  }, [
++    athlete.bib,
++    athlete.colorSeed,
++    athlete.name,
++    athlete.photoUrl,
++    athlete.selected,
++    showLabel,
++  ]);
+ 
+   return (
+     <Marker.Animated
+       coordinate={coordinate as never}
+-      zIndex={1_000}
++      zIndex={athlete.selected ? 1_000 : 100}
+       tracksViewChanges={tracksViewChanges}
+       title={athlete.name}
+       description={athleteMarkerDescription(athlete)}
+@@ -343,43 +317,6 @@ function AnimatedSelectedAthleteMarker({
+   );
+ }
+ 
+-function StaticAthleteMarker({
+-  athlete,
+-  showLabel,
+-  onPress,
+-}: {
+-  athlete: MapAthlete;
+-  showLabel: boolean;
+-  onPress?: () => void;
+-}) {
+-  // Native maps renders custom marker children into a bitmap. Give both Apple
+-  // Maps and Google Maps a short capture window on mount/label changes, then
+-  // freeze the bitmap so background watchlist markers stay inexpensive.
+-  const [tracksViewChanges, setTracksViewChanges] = useState(true);
+-  useEffect(() => {
+-    setTracksViewChanges(true);
+-    const timer = setTimeout(() => setTracksViewChanges(false), 800);
+-    return () => clearTimeout(timer);
+-  }, [athlete.bib, athlete.name, athlete.photoUrl, showLabel]);
+-
+-  return (
+-    <Marker
+-      coordinate={{
+-        latitude: athlete.position.lat,
+-        longitude: athlete.position.lng,
+-      }}
+-      zIndex={100}
+-      tracksViewChanges={tracksViewChanges}
+-      title={athlete.name}
+-      description={athleteMarkerDescription(athlete)}
+-      anchor={{ x: 0.5, y: 0.5 }}
+-      onPress={onPress}
+-    >
+-      <AthleteMarkerBody athlete={athlete} showLabel={showLabel} />
+-    </Marker>
+-  );
+-}
+-
+ function AthleteMarker({
+   athlete,
+   showLabel,
+@@ -389,17 +326,8 @@ function AthleteMarker({
+   showLabel: boolean;
+   onPress?: () => void;
+ }) {
+-  if (athlete.selected) {
+-    return (
+-      <AnimatedSelectedAthleteMarker
+-        athlete={athlete}
+-        showLabel={showLabel}
+-        onPress={onPress}
+-      />
+-    );
+-  }
+   return (
+-    <StaticAthleteMarker
++    <AnimatedAthleteMarker
+       athlete={athlete}
+       showLabel={showLabel}
+       onPress={onPress}
+@@ -1119,6 +1047,15 @@ function CourseMapViewComponent({
+     mapPreferences?.showDistanceLabels ?? showDistanceLabels;
+   const effectiveShowRoute = mapPreferences?.showRoute ?? showRoute;
+   const selectedAthlete = athletes.find((athlete) => athlete.selected);
++  // Keep press indices stable, but render the carousel selection last. Android
++  // uses render order as a layer tie-breaker, so the swiped athlete stays on
++  // top when several not-started athletes share the course start coordinate.
++  const athleteMarkerEntries = athletes
++    .map((athlete, index) => ({ athlete, index }))
++    .sort(
++      (left, right) =>
++        Number(left.athlete.selected) - Number(right.athlete.selected),
++    );
+   const selectedLeg = useMemo(() => {
+     if (!map || !selectedAthlete) return null;
+     const requestedLeg = String(selectedAthlete.currentLeg || "")
+@@ -1293,7 +1230,7 @@ function CourseMapViewComponent({
+ 
+   useEffect(() => {
+     if (allCoords.length > 1) {
+-      const viewportKey = `${courseFocusSignature}:${windowWidth}:${windowHeight}:${selectedAthleteId || "none"}`;
++      const viewportKey = `${courseFocusSignature}:${windowWidth}:${windowHeight}`;
+       if (lastViewportFitKeyRef.current === viewportKey) return undefined;
+       lastViewportFitKeyRef.current = viewportKey;
+       const timer = setTimeout(() => {
+@@ -1493,10 +1430,10 @@ function CourseMapViewComponent({
+                 </Marker>
+               );
+             })}
+-            {athletes.map((athlete, index) => (
++            {athleteMarkerEntries.map(({ athlete, index }) => (
+               <AthleteMarker
+                 key={athlete.id ?? athlete.bib ?? athlete.name}
+-                athlete={spreadOverlappingAthlete(athletes, athlete, index)}
++                athlete={athlete}
+                 showLabel={effectiveShowAthleteLabels}
+                 onPress={() => {
+                   onAthletePress?.(athlete, index);
+@@ -1682,10 +1619,10 @@ function CourseMapViewComponent({
+               </Marker>
+             );
+           })}
+-          {athletes.map((athlete, index) => (
++          {athleteMarkerEntries.map(({ athlete, index }) => (
+             <AthleteMarker
+               key={athlete.id ?? athlete.bib ?? athlete.name}
+-              athlete={spreadOverlappingAthlete(athletes, athlete, index)}
++              athlete={athlete}
+               showLabel={effectiveShowAthleteLabels}
+               onPress={() => {
+                 onAthletePress?.(athlete, index);
+diff --git a/src/features/tracking/course-map/components/course-map-athlete-marker-contract.test.ts b/src/features/tracking/course-map/components/course-map-athlete-marker-contract.test.ts
+index d15e8df..e27bdd7 100644
+--- a/src/features/tracking/course-map/components/course-map-athlete-marker-contract.test.ts
++++ b/src/features/tracking/course-map/components/course-map-athlete-marker-contract.test.ts
+@@ -7,14 +7,15 @@ const mapSource = readFileSync(
+   "utf8",
+ );
+ 
+-test("only the selected athlete uses a continuously animated native marker", () => {
+-  assert.match(mapSource, /function AnimatedSelectedAthleteMarker/);
+-  assert.match(mapSource, /function StaticAthleteMarker/);
+-  assert.match(mapSource, /if \(athlete\.selected\)/);
++test("every moving athlete uses a persistent animated native marker", () => {
++  assert.match(mapSource, /function AnimatedAthleteMarker/);
++  assert.doesNotMatch(mapSource, /function StaticAthleteMarker/);
+   assert.match(mapSource, /<Marker\.Animated/);
++  assert.match(mapSource, /coordinate\s*\.timing\(/);
++  assert.match(mapSource, /zIndex=\{athlete\.selected \? 1_000 : 100\}/);
+   assert.match(
+     mapSource,
+-    /setTimeout\(\(\) => setTracksViewChanges\(false\), 800\)/,
++    /setTimeout\(\(\) => setTracksViewChanges\(false\), 900\)/,
+   );
+ });
+ 
+@@ -22,14 +23,36 @@ test("both native map layouts render the lightweight athlete marker wrapper", ()
+   assert.equal((mapSource.match(/<AthleteMarker\s/g) ?? []).length, 2);
+ });
+ 
+-test("athletes at the same course coordinate are spread into visible markers", () => {
+-  assert.match(mapSource, /function spreadOverlappingAthlete/);
++test("athlete coordinates stay exactly on the configured course geometry", () => {
++  assert.doesNotMatch(mapSource, /function spreadOverlappingAthlete/);
++  assert.ok((mapSource.match(/athlete=\{athlete\}/g) ?? []).length >= 2);
++});
++
++test("the carousel selection is redrawn and rendered above a shared start marker", () => {
++  assert.match(mapSource, /athlete\.selected,\s*showLabel,/);
++  assert.match(mapSource, /const athleteMarkerEntries = athletes/);
++  assert.match(
++    mapSource,
++    /Number\(left\.athlete\.selected\) - Number\(right\.athlete\.selected\)/,
++  );
+   assert.equal(
+-    (mapSource.match(/athlete=\{spreadOverlappingAthlete\(/g) ?? []).length,
++    (mapSource.match(/athleteMarkerEntries\.map\(\(\{ athlete, index \}\)/g) ?? [])
++      .length,
+     2,
+   );
+ });
+ 
++test("changing the selected athlete does not refit the course viewport", () => {
++  assert.match(
++    mapSource,
++    /const viewportKey = `\$\{courseFocusSignature\}:\$\{windowWidth\}:\$\{windowHeight\}`/,
++  );
++  assert.doesNotMatch(
++    mapSource,
++    /const viewportKey = `[^`]*selectedAthleteId/,
++  );
++});
++
+ test("GPX coordinate arrays are memoized outside the native map render", () => {
+   assert.match(mapSource, /const legPolylines = useMemo/);
+   assert.match(mapSource, /const transitionPolylines = useMemo/);
+diff --git a/src/features/tracking/course-map/courseConfig.points.test.ts b/src/features/tracking/course-map/courseConfig.points.test.ts
+index 8666811..02b78dd 100644
+--- a/src/features/tracking/course-map/courseConfig.points.test.ts
++++ b/src/features/tracking/course-map/courseConfig.points.test.ts
+@@ -38,3 +38,29 @@ test("published coordinate arrays render without refetching a GPX file", async (
+   });
+   assert.equal(geometry?.legs[0].loadError, false);
+ });
++
++test("tracked athlete resolves only the matching ticket geometry", async () => {
++  const geometry = await resolveCourseGeometry(
++    {
++      ticketDefinitions: [
++        {
++          id: "sprint",
++          name: "Sprint",
++          providerContestUuid: "contest-sprint",
++          courseMaps: { runPoints: [{ latitude: 1, longitude: 1 }, { latitude: 2, longitude: 2 }] },
++        },
++        {
++          id: "olympic",
++          name: "Olympic",
++          providerContestUuid: "contest-olympic",
++          courseMaps: { runPoints: [{ latitude: 10, longitude: 10 }, { latitude: 20, longitude: 20 }] },
++        },
++      ],
++    },
++    async () => { throw new Error("coordinate-backed course must not fetch"); },
++    { contestId: "contest-olympic", contestName: "Olympic" },
++  );
++
++  assert.equal(geometry?.contestId, "olympic");
++  assert.deepEqual(geometry?.legs[0].path[0], { lat: 10, lng: 10 });
++});
+diff --git a/src/features/tracking/engine/geo.test.ts b/src/features/tracking/engine/geo.test.ts
+new file mode 100644
+index 0000000..d7dc276
+--- /dev/null
++++ b/src/features/tracking/engine/geo.test.ts
+@@ -0,0 +1,30 @@
++import { describe, expect, it } from "vitest";
++
++import { nearestPositionOnPath } from "./geo";
++
++describe("nearestPositionOnPath", () => {
++  it("snaps an off-course GPS coordinate onto the nearest route segment", () => {
++    const position = nearestPositionOnPath(
++      [
++        { lat: 13, lng: 74 },
++        { lat: 13, lng: 75 },
++      ],
++      { lat: 13.01, lng: 74.4 },
++    );
++
++    expect(position?.lat).toBeCloseTo(13, 8);
++    expect(position?.lng).toBeCloseTo(74.4, 8);
++  });
++
++  it("clamps a GPS coordinate beyond the route to its endpoint", () => {
++    const position = nearestPositionOnPath(
++      [
++        { lat: 13, lng: 74 },
++        { lat: 13, lng: 75 },
++      ],
++      { lat: 13, lng: 76 },
++    );
++
++    expect(position).toEqual({ lat: 13, lng: 75 });
++  });
++});
+diff --git a/src/features/tracking/engine/geo.ts b/src/features/tracking/engine/geo.ts
+index 1a2433c..698368a 100644
+--- a/src/features/tracking/engine/geo.ts
++++ b/src/features/tracking/engine/geo.ts
+@@ -46,6 +46,55 @@ const lerp = (a: LatLng, b: LatLng, t: number): LatLng => ({
+   lng: a.lng + (b.lng - a.lng) * t,
+ });
+ 
++/**
++ * Returns the closest coordinate on a published course polyline. Raw phone GPS
++ * commonly drifts several metres to either side of a road; athlete markers are
++ * course progress indicators and therefore must remain on the configured path.
++ */
++export function nearestPositionOnPath(
++  points: readonly LatLng[],
++  position: LatLng,
++): LatLng | undefined {
++  if (points.length === 0) return undefined;
++  if (points.length === 1) return points[0];
++
++  const latitudeScale = Math.max(
++    1e-6,
++    Math.cos(toRad(position.lat)),
++  );
++  let closest = points[0];
++  let closestDistanceSquared = Number.POSITIVE_INFINITY;
++
++  for (let index = 1; index < points.length; index += 1) {
++    const start = points[index - 1];
++    const end = points[index];
++    const startX = (start.lng - position.lng) * latitudeScale;
++    const startY = start.lat - position.lat;
++    const segmentX = (end.lng - start.lng) * latitudeScale;
++    const segmentY = end.lat - start.lat;
++    const segmentLengthSquared =
++      segmentX * segmentX + segmentY * segmentY;
++    const fraction =
++      segmentLengthSquared > 0
++        ? clamp01(
++            -(startX * segmentX + startY * segmentY) /
++              segmentLengthSquared,
++          )
++        : 0;
++    const projected = lerp(start, end, fraction);
++    const projectedX = (projected.lng - position.lng) * latitudeScale;
++    const projectedY = projected.lat - position.lat;
++    const distanceSquared =
++      projectedX * projectedX + projectedY * projectedY;
++    if (distanceSquared < closestDistanceSquared) {
++      closestDistanceSquared = distanceSquared;
++      closest = projected;
++    }
++  }
++
++  return closest;
++}
++
+ /**
+  * Position at a normalized fraction (0..1) along the path. Fraction-based so it
+  * works regardless of the geometry's absolute scale (course km ≠ GPX meters).
+diff --git a/src/features/tracking/hooks/useCanonicalChangeStream.test.ts b/src/features/tracking/hooks/useCanonicalChangeStream.test.ts
+new file mode 100644
+index 0000000..0f8e603
+--- /dev/null
++++ b/src/features/tracking/hooks/useCanonicalChangeStream.test.ts
+@@ -0,0 +1,19 @@
++import assert from 'node:assert/strict';
++import { readFileSync } from 'node:fs';
++import test from 'node:test';
++
++const source = readFileSync(
++  new URL('./useCanonicalChangeStream.ts', import.meta.url),
++  'utf8',
++);
++
++test('canonical participant changes refresh event athlete queries across identity aliases', () => {
++  assert.match(
++    source,
++    /queryKey\[1\] === 'athlete-detail' && queryKey\[2\] === eventId[\s\S]*?return true/,
++  );
++  assert.match(
++    source,
++    /queryKey\[0\] === 'canonical-live' && queryKey\[1\] === eventId && queryKey\[3\] === 'athlete'/,
++  );
++});
+diff --git a/src/features/tracking/hooks/useCanonicalChangeStream.ts b/src/features/tracking/hooks/useCanonicalChangeStream.ts
+index 84c161e..dc458fa 100644
+--- a/src/features/tracking/hooks/useCanonicalChangeStream.ts
++++ b/src/features/tracking/hooks/useCanonicalChangeStream.ts
+@@ -7,16 +7,19 @@ import { subscribeCanonicalChangeStream } from './canonicalChangeStreamRegistry'
+ 
+ const pendingRenders = new Map<string, CanonicalChangeEvent>();
+ 
+-function participantQuery(queryKey: readonly unknown[], eventId: string, participantUuid?: string): boolean {
++export function participantQuery(queryKey: readonly unknown[], eventId: string, participantUuid?: string): boolean {
+   if (queryKey[0] === 'tracking' && queryKey[1] === 'participants' && queryKey[2] === eventId) return true;
+   if (!participantUuid) return queryKey[0] === 'tracking' && queryKey[2] === eventId;
+   if (queryKey[0] === 'tracking' && queryKey[1] === 'athlete-detail' && queryKey[2] === eventId) {
+-    const identity = queryKey[3];
+-    return typeof identity === 'string' ? identity === participantUuid : Boolean(identity && typeof identity === 'object'
+-      && Object.values(identity as Record<string, unknown>).some((value) => value === participantUuid));
++    // A persisted watchlist can be keyed by bib or an older provider UUID,
++    // while the change hub always publishes the canonical participant UUID.
++    // Refresh the event's active athlete reads instead of dropping the update
++    // when those equivalent identities are spelled differently.
++    return true;
+   }
+-  return queryKey[0] === 'canonical-live' && queryKey[1] === eventId && queryKey[3] === 'athlete'
+-    && String(queryKey[4] ?? '').endsWith(`:${participantUuid}`);
++  // Canonical query keys can also retain a bib/provider alias, so apply the
++  // same event-scoped refresh rule to athlete snapshots from that repository.
++  return queryKey[0] === 'canonical-live' && queryKey[1] === eventId && queryKey[3] === 'athlete';
+ }
+ 
+ function leaderboardQuery(queryKey: readonly unknown[], eventId: string): boolean {
+diff --git a/src/features/tracking/hooks/useTrackingQueries.ts b/src/features/tracking/hooks/useTrackingQueries.ts
+index a3e51ff..e2eda1d 100644
+--- a/src/features/tracking/hooks/useTrackingQueries.ts
++++ b/src/features/tracking/hooks/useTrackingQueries.ts
+@@ -828,7 +828,12 @@ export function useAthleteDetail(
+   return query;
+ }
+ 
+-export function useCourseMap(eventId: string, enabled = true) {
++export function useCourseMap(
++  eventId: string,
++  enabled = true,
++  selection?: CourseMapSelection,
++  includeGeometry = false,
++) {
+   const validEventId = hasValidEventId(eventId);
+   const resolvedEventId = validEventId ? eventId.trim() : "disabled";
+   const sessionStatus = useSession((state) => state.status);
+@@ -841,14 +846,27 @@ export function useCourseMap(eventId: string, enabled = true) {
+   const accessScope = sessionStatus === "authenticated"
+     ? `account:${sessionUid || "authenticated"}`
+     : sessionStatus;
++  const selectionKey = [
++    firstText(selection?.ticketId),
++    firstText(selection?.contestId),
++    firstText(selection?.contestName),
++  ].join(":");
+   return useQuery({
+-    queryKey: [...queryKeys.courseMap(resolvedEventId), accessScope],
++    queryKey: [
++      ...queryKeys.courseMap(resolvedEventId),
++      "stale-contest-fallback-v1",
++      accessScope,
++      includeGeometry ? "geometry" : "metadata",
++      selectionKey,
++    ],
+     queryFn: async ({ signal }) => {
+       if (!validEventId) throw new Error("EVENT_ID_REQUIRED");
+       try {
+         return await repositories.course.getCourseMapResources(
+           resolvedEventId,
+           signal,
++          selection,
++          includeGeometry,
+         );
+       } catch (error) {
+         if ((error as ApiError | undefined)?.status === 404) {
+@@ -872,9 +890,9 @@ export function useCourseMap(eventId: string, enabled = true) {
+ 
+ /**
+  * Real course geometry for the live map: reads the event's course config from
+- * the backend (Firestore-backed course maps) and resolves the per-leg GPX into
++ * the backend and resolves the selected ticket's compact GPX/KML geometry into
+  * polylines + markers. Static per event → cached aggressively. Returns null
+- * when the event has no GPX configured (falls back to the text/summary view).
++ * when the event has no course configured (falls back to the text/summary view).
+  */
+ export function useCourseGeometry(
+   eventId: string,
+@@ -884,12 +902,11 @@ export function useCourseGeometry(
+ ) {
+   const validEventId = hasValidEventId(eventId);
+   const resolvedEventId = validEventId ? eventId.trim() : "disabled";
+-  const resourcesQuery = useCourseMap(resolvedEventId, enabled);
+-  const courseMapVersion = JSON.stringify(
+-    ((resourcesQuery.data?.courseMap?.ticketDefinitions as Record<string, unknown>[] | undefined) ?? []).map(
+-      (ticket) => ({ id: ticket.id, courseMaps: ticket.courseMaps }),
+-    ),
+-  );
++  const resourcesQuery = useCourseMap(resolvedEventId, enabled, selection, true);
++  // The response version changes whenever an admin republishes a course.
++  // Avoid serializing thousands of coordinates into a React Query key on
++  // every render; that was a visible pause when switching tracked athletes.
++  const courseMapVersion = firstText(resourcesQuery.data?.courseMap?.updatedAt) || "unversioned";
+   const canonicalCourseVersion = JSON.stringify(
+     ((resourcesQuery.data?.courseIndex?.contests as Record<string, unknown>[] | undefined) ?? []).map(
+       (contest) => ({
+@@ -906,7 +923,7 @@ export function useCourseGeometry(
+   return useQuery({
+     queryKey: [
+       ...queryKeys.courseMap(resolvedEventId),
+-      "geometry-v3-map-timing-points",
++      "geometry-v4-stale-contest-fallback",
+       selectionKey,
+       courseMapVersion,
+       canonicalCourseVersion,
+diff --git a/src/features/tracking/leaderboard/components/LeaderboardScreen.tsx b/src/features/tracking/leaderboard/components/LeaderboardScreen.tsx
+index 260ff42..ca9f88c 100644
+--- a/src/features/tracking/leaderboard/components/LeaderboardScreen.tsx
++++ b/src/features/tracking/leaderboard/components/LeaderboardScreen.tsx
+@@ -1303,7 +1303,7 @@ export function LeaderboardScreen() {
+     });
+   }, [configuredContests, leaderboardEntries, liveParticipants]);
+   const selectedContest = useMemo<FilterOption | "all">(() => {
+-    if (contestOptions.length === 0) return "all";
++    if (contestKey === "all" || contestOptions.length === 0) return "all";
+     return (
+       contestOptions.find((option) => option.key === contestKey) ??
+       contestOptions[0]
+diff --git a/src/features/tracking/mappers.raceupshot-canonical.test.ts b/src/features/tracking/mappers.raceupshot-canonical.test.ts
+index 975c679..87d91a9 100644
+--- a/src/features/tracking/mappers.raceupshot-canonical.test.ts
++++ b/src/features/tracking/mappers.raceupshot-canonical.test.ts
+@@ -243,3 +243,57 @@ test("finished results expose configured distance and average speed", () => {
+   assert.equal(detail.result?.distanceKm, 10);
+   assert.equal(detail.result?.averageSpeedKmh, 10);
+ });
++
++test("finished result start boundaries never turn transition time into sport pace", () => {
++  const detail = mapAthleteDetail({
++    success: true,
++    eventId: "event-1",
++    visibility: "PUBLIC",
++    athlete: {
++      id: "participant-1",
++      bib: "1005",
++      displayName: "Transition Athlete",
++      contestName: "Triathlon",
++      raceStatus: "FINISHED",
++      status: "FINISHED",
++      splits: [
++        { splitId: "swim-finish", name: "Swim Finish", cumulativeTime: "00:28:14", officialTimeMs: 1_694_000, distanceKm: 1.5, status: "PROVISIONAL" },
++        { splitId: "bike-start", name: "Bike Start", cumulativeTime: "00:41:58", officialTimeMs: 2_518_000, distanceKm: 1.6, paceSpeed: "0.4 km/h", status: "PROVISIONAL" },
++        { splitId: "bike-finish", name: "Bike Finish", cumulativeTime: "01:35:05", officialTimeMs: 5_705_000, distanceKm: 41.5, status: "PROVISIONAL" },
++        { splitId: "run-start", name: "Run Start", cumulativeTime: "01:47:02", officialTimeMs: 6_422_000, distanceKm: 41.6, paceSpeed: "119:30 /km", status: "PROVISIONAL" },
++        { splitId: "race-finish", name: "Race Finish", cumulativeTime: "02:57:24", officialTimeMs: 10_644_000, distanceKm: 51.5, status: "PROVISIONAL" },
++      ],
++    },
++    result: {
++      status: "FINISHED",
++      chipTime: "02:57:24",
++      officialTime: "02:57:24",
++      splits: [
++        { label: "Swim Finish", time: "00:28:14", distanceKm: 1.5 },
++        { label: "Bike Start", time: "00:41:58", distanceKm: 1.6, paceSpeed: "0.4 km/h" },
++        { label: "Bike Finish", time: "01:35:05", distanceKm: 41.5 },
++        { label: "Run Start", time: "01:47:02", distanceKm: 41.6, paceSpeed: "119:30 /km" },
++        { label: "Race Finish", time: "02:57:24", distanceKm: 51.5 },
++      ],
++    },
++    timingConfiguration: {
++      legs: [
++        { id: "swim", name: "Swim", type: "SWIM", order: 1, distanceKm: 1.5 },
++        { id: "bike", name: "Bike", type: "BIKE", order: 2, distanceKm: 40 },
++        { id: "run", name: "Run", type: "RUN", order: 3, distanceKm: 10 },
++      ],
++      splits: [
++        { id: "swim-finish", name: "Swim Finish", legId: "swim", order: 1, distanceKm: 1.5 },
++        { id: "bike-start", name: "Bike Start", legId: "bike", order: 2, distanceKm: 1.6 },
++        { id: "bike-finish", name: "Bike Finish", legId: "bike", order: 3, distanceKm: 41.5 },
++        { id: "run-start", name: "Run Start", legId: "run", order: 4, distanceKm: 41.6 },
++        { id: "race-finish", name: "Race Finish", legId: "run", order: 5, distanceKm: 51.5, isRaceFinish: true },
++      ],
++    },
++  } as never);
++
++  assert.equal(detail.result?.splits.find((split) => split.label === "Bike Start")?.paceSpeed, undefined);
++  assert.equal(detail.result?.splits.find((split) => split.label === "Run Start")?.paceSpeed, undefined);
++  assert.equal(detail.result?.splits.find((split) => split.label === "Bike Start")?.value, "00:41:58");
++  assert.equal(detail.result?.splits.find((split) => split.label === "Run Start")?.value, "01:47:02");
++});
+diff --git a/src/features/tracking/mappers.ts b/src/features/tracking/mappers.ts
+index 57c17bf..dc4c69d 100644
+--- a/src/features/tracking/mappers.ts
++++ b/src/features/tracking/mappers.ts
+@@ -1684,12 +1684,29 @@ function splitLegKind(
+   return "other";
+ }
+ 
++function suppressPaceAtBoundary(value: unknown): boolean {
++  const boundary = normalizeKey(text(value));
++  return (
++    boundary === "start" ||
++    boundary === "t1" ||
++    boundary === "t2" ||
++    boundary.includes("transition") ||
++    boundary.endsWith("start")
++  );
++}
++
+ function calculatePaceOrSpeed(
+   current?: Split,
+   previous?: Split,
+   label?: string,
+ ): string {
+   if (!current) return DASH;
++  // Bike Start and Run Start close T1/T2. Their elapsed delta is transition
++  // time, not time spent moving through the next sport. Never divide that
++  // transition by a small configured course offset to invent pace/speed.
++  if (suppressPaceAtBoundary(label ?? current.name ?? current.segment)) {
++    return DASH;
++  }
+   const elapsed = current.time - (previous?.time ?? 0);
+   const distance = current.distance - (previous?.distance ?? 0);
+   if (elapsed <= 0 || distance <= 0) return DASH;
+@@ -2752,6 +2769,17 @@ function mapDerivedFinish(
+   if (serverPrediction) return serverPrediction;
+   if (!track || !(track.seed.paceSecPerKm > 0) || !(track.totalKm > 0))
+     return undefined;
++  // A pace measured in one triathlon discipline cannot be projected across
++  // the remaining swim/bike/run distance. That produced implausible carousel
++  // clocks (for example 13:57:35). Until canonical timing supplies a real
++  // multi-leg finish prediction, show only the next-split ETA.
++  if (
++    track.currentLegDistanceKm != null &&
++    track.currentLegDistanceKm > 0 &&
++    track.currentLegDistanceKm < track.totalKm - 0.001
++  ) {
++    return undefined;
++  }
+   const remainingSeconds =
+     Math.max(0, track.totalKm - track.seed.anchorKm) *
+     track.seed.paceSecPerKm;
+@@ -2857,6 +2885,7 @@ function mapResult(
+     );
+     const display = (value?: string) => value && value !== DASH ? value : undefined;
+     const timelineDistance = Number(String(timingPoint?.distanceLabel ?? "").replace(/[^0-9.]/g, ""));
++    const suppressBoundaryPace = suppressPaceAtBoundary(s.label);
+     return {
+       label: s.label,
+       value: athleteDuration(timingPoint?.elapsedTimeLabel ?? s.time),
+@@ -2864,7 +2893,9 @@ function mapResult(
+       // raw provider ISO timestamp on an athlete-facing finished result.
+       timeOfDay: display(timingPoint?.timeOfDayLabel),
+       segmentTime: athleteDuration(timingPoint?.splitTimeLabel ?? s.segmentTime),
+-      paceSpeed: display(timingPoint?.paceSpeedLabel) ?? s.paceSpeed,
++      paceSpeed: suppressBoundaryPace
++        ? undefined
++        : display(timingPoint?.paceSpeedLabel) ?? s.paceSpeed,
+       rank: s.rank != null ? String(s.rank).replace(/^#/, "") : undefined,
+       leg: s.leg,
+       distanceKm: Number.isFinite(timelineDistance) && timelineDistance >= 0
+diff --git a/src/features/tracking/timing/compactRaceProgressTiming.test.ts b/src/features/tracking/timing/compactRaceProgressTiming.test.ts
+index 064903b..7b3cc87 100644
+--- a/src/features/tracking/timing/compactRaceProgressTiming.test.ts
++++ b/src/features/tracking/timing/compactRaceProgressTiming.test.ts
+@@ -1,7 +1,11 @@
+ import { describe, expect, test } from "vitest";
+ 
+ import type { AthleteRaceTiming } from "./raceSections";
+-import { transitionDurationForStage } from "./compactRaceProgressTiming";
++import {
++  liveTransitionElapsedSeconds,
++  transitionDurationForStage,
++  transitionTimeLabelForStage,
++} from "./compactRaceProgressTiming";
+ 
+ describe("transitionDurationForStage", () => {
+   const raceTiming: AthleteRaceTiming = {
+@@ -39,4 +43,98 @@ describe("transitionDurationForStage", () => {
+   test("does not treat sport legs as transitions", () => {
+     expect(transitionDurationForStage(raceTiming, "BIKE")).toBeNull();
+   });
++
++  test("returns a running elapsed time only for an active transition", () => {
++    const active: AthleteRaceTiming = {
++      overallTimeSeconds: 1_000,
++      warnings: [],
++      sections: [
++        {
++          type: "transition",
++          id: "T1",
++          title: "Transition 1",
++          shortLabel: "T1",
++          status: "in_progress",
++          startedAt: "2026-10-19T12:00:00.000Z",
++          durationSeconds: null,
++          averageMetric: null,
++          rows: [],
++        },
++      ],
++    };
++    expect(
++      liveTransitionElapsedSeconds(
++        active,
++        "T1",
++        Date.parse("2026-10-19T12:02:05.000Z"),
++      ),
++    ).toBe(125);
++    active.sections[0].status = "completed";
++    expect(
++      liveTransitionElapsedSeconds(
++        active,
++        "T1",
++        Date.parse("2026-10-19T12:02:05.000Z"),
++      ),
++    ).toBeNull();
++  });
++
++  test("falls back to transition order and row timing for generic provider labels", () => {
++    const generic: AthleteRaceTiming = {
++      overallTimeSeconds: null,
++      warnings: [],
++      sections: [
++        {
++          type: "transition",
++          id: "changeover-a",
++          title: "Changeover",
++          status: "completed",
++          durationSeconds: null,
++          averageMetric: null,
++          rows: [{
++            key: "bike-start",
++            name: "Bike Start",
++            splitDurationSeconds: 91,
++            legElapsedSeconds: 91,
++            overallElapsedSeconds: 1_000,
++            timeOfDay: null,
++            metric: null,
++            status: "valid",
++          }],
++        },
++        {
++          type: "transition",
++          id: "changeover-b",
++          title: "Changeover",
++          status: "completed",
++          durationSeconds: 73,
++          averageMetric: null,
++          rows: [],
++        },
++      ],
++    };
++    expect(transitionDurationForStage(generic, "T1")).toBe(91);
++    expect(transitionDurationForStage(generic, "T2")).toBe(73);
++  });
++
++  test("reads Feibot transition segment time from the next sport boundary", () => {
++    const timeline = [
++      {
++        segment: "BIKE",
++        name: "BIKE START",
++        splitLabel: "Bike Start",
++        splitTimeLabel: "00:25:59",
++        state: "completed",
++      },
++      {
++        segment: "RUN",
++        name: "RUN START",
++        splitLabel: "Run Start",
++        splitTimeLabel: "00:03:12",
++        state: "completed",
++      },
++    ];
++    expect(transitionTimeLabelForStage(timeline, "T1")).toBe("00:25:59");
++    expect(transitionTimeLabelForStage(timeline, "T2")).toBe("00:03:12");
++  });
+ });
+diff --git a/src/features/tracking/timing/compactRaceProgressTiming.ts b/src/features/tracking/timing/compactRaceProgressTiming.ts
+index 195b222..f7ce975 100644
+--- a/src/features/tracking/timing/compactRaceProgressTiming.ts
++++ b/src/features/tracking/timing/compactRaceProgressTiming.ts
+@@ -15,15 +15,70 @@ export function transitionDurationForStage(
+   const key = stage.trim().toLowerCase();
+   if (key !== "t1" && key !== "t2") return null;
+ 
+-  const transition = raceTiming?.sections.find(
++  const transitions = raceTiming?.sections.filter(
++    (section) => section.type === "transition",
++  ) ?? [];
++  const explicitlyNamed = transitions.find(
+     (section) =>
+-      section.type === "transition" &&
+       normalizedWords(
+         `${section.shortLabel ?? ""} ${section.id} ${section.title}`,
+       ).includes(key),
+   );
+-  const duration = transition?.durationSeconds;
++  // Older/canonical providers can publish generic transition names while
++  // preserving course order. T1 is the first transition and T2 the second.
++  const transition = explicitlyNamed ?? transitions[key === "t1" ? 0 : 1];
++  const rowDuration = transition?.rows
++    .flatMap((row) => [row.splitDurationSeconds, row.legElapsedSeconds])
++    .find((value): value is number => value != null && Number.isFinite(value));
++  const duration = transition?.durationSeconds ?? rowDuration;
+   return duration != null && Number.isFinite(duration)
+     ? Math.max(0, duration)
+     : null;
+ }
++
++export function liveTransitionElapsedSeconds(
++  raceTiming: AthleteRaceTiming | undefined,
++  stage: string,
++  nowMs = Date.now(),
++): number | null {
++  const key = stage.trim().toLowerCase();
++  if (key !== "t1" && key !== "t2") return null;
++  const transitions =
++    raceTiming?.sections.filter((section) => section.type === "transition") ?? [];
++  const explicitlyNamed = transitions.find((section) =>
++    normalizedWords(
++      `${section.shortLabel ?? ""} ${section.id} ${section.title}`,
++    ).includes(key),
++  );
++  const transition = explicitlyNamed ?? transitions[key === "t1" ? 0 : 1];
++  if (transition?.status !== "in_progress" || !transition.startedAt) return null;
++  const startedAtMs = Date.parse(transition.startedAt);
++  if (!Number.isFinite(startedAtMs)) return null;
++  return Math.max(0, Math.floor((nowMs - startedAtMs) / 1_000));
++}
++
++type TransitionTimelineRow = {
++  segment?: string;
++  name?: string;
++  splitLabel?: string;
++  splitTimeLabel?: string;
++  state?: string;
++};
++
++export function transitionTimeLabelForStage(
++  timeline: TransitionTimelineRow[],
++  stage: string,
++): string | null {
++  const key = stage.trim().toUpperCase();
++  const boundary = key === "T1" ? "BIKESTART" : key === "T2" ? "RUNSTART" : "";
++  if (!boundary) return null;
++  const match = [...timeline].reverse().find((row) => {
++    if (row.state === "upcoming") return false;
++    const identity = `${row.segment ?? ""} ${row.name ?? ""} ${row.splitLabel ?? ""}`
++      .toUpperCase()
++      .replace(/[^A-Z0-9]/g, "");
++    return identity.includes(boundary);
++  });
++  const value = match?.splitTimeLabel?.trim();
++  return value && !["--:--", "—"].includes(value) ? value : null;
++}
+diff --git a/src/features/tracking/timing/freshness.test.ts b/src/features/tracking/timing/freshness.test.ts
+index 42459c4..00be10c 100644
+--- a/src/features/tracking/timing/freshness.test.ts
++++ b/src/features/tracking/timing/freshness.test.ts
+@@ -70,6 +70,31 @@ test("a stale started response cannot regress a canonical finish", () => {
+   assert.equal(hasCanonicalFinishEvidence(stale), false);
+ });
+ 
++test("a newer canonical timing correction can retract a mistaken finish", () => {
++  const mistakenFinish = {
++    activeVersion: "2026-08-09T082000.000Z-a1b2c3",
++    timingVersion: 25,
++    updatedAt: "2026-08-09T08:20:00.000Z",
++    participantLive: {
++      status: "FINISHED",
++      splits: [split("run_finish", 6, "2026-08-09T07:24:07.000Z")],
++    },
++  };
++  const corrected = {
++    ...mistakenFinish,
++    timingVersion: 26,
++    updatedAt: "2026-08-09T08:21:00.000Z",
++    participantLive: {
++      status: "ON_COURSE",
++      splits: [split("run_start", 5, "2026-08-09T07:13:32.000Z")],
++    },
++  };
++  assert.equal(
++    preferFreshestAthleteResponse(mistakenFinish, corrected),
++    corrected,
++  );
++});
++
+ test("a timestamp-only provider refresh preserves the current object", () => {
+   const current = {
+     timingVersion: 7,
+diff --git a/src/features/tracking/timing/freshness.ts b/src/features/tracking/timing/freshness.ts
+index 8c68ac7..67dbcab 100644
+--- a/src/features/tracking/timing/freshness.ts
++++ b/src/features/tracking/timing/freshness.ts
+@@ -221,13 +221,14 @@ export function preferFreshestAthleteResponse<T>(
+   incoming: T,
+ ): T {
+   if (!current) return incoming;
+-  if (
+-    hasCanonicalFinishEvidence(current) &&
+-    !hasCanonicalFinishEvidence(incoming)
+-  )
+-    return current;
+   const currentBuild = buildTimestamp(current);
+   const incomingBuild = buildTimestamp(incoming);
++  if (
++    currentBuild !== null &&
++    incomingBuild !== null &&
++    incomingBuild > currentBuild
++  )
++    return incoming;
+   if (
+     currentBuild !== null &&
+     incomingBuild !== null &&
+@@ -237,6 +238,14 @@ export function preferFreshestAthleteResponse<T>(
+ 
+   const currentTiming = maximumNumber(current, ["timingVersion"]);
+   const incomingTiming = maximumNumber(incoming, ["timingVersion"]);
++  // Canonical timing versions are authoritative even when a correction moves
++  // an athlete backwards (for example, Feibot retracts a mistaken Run Finish).
++  if (
++    currentTiming !== null &&
++    incomingTiming !== null &&
++    incomingTiming > currentTiming
++  )
++    return incoming;
+   if (
+     currentTiming !== null &&
+     incomingTiming !== null &&
+@@ -244,6 +253,12 @@ export function preferFreshestAthleteResponse<T>(
+   )
+     return current;
+ 
++  if (
++    hasCanonicalFinishEvidence(current) &&
++    !hasCanonicalFinishEvidence(incoming)
++  )
++    return current;
++
+   const currentAccepted = acceptedSplitCount(current);
+   const incomingAccepted = acceptedSplitCount(incoming);
+   const versionDidNotAdvance =
+diff --git a/src/features/tracking/timing/index.ts b/src/features/tracking/timing/index.ts
+index 5af5e5a..02a28af 100644
+--- a/src/features/tracking/timing/index.ts
++++ b/src/features/tracking/timing/index.ts
+@@ -3,3 +3,4 @@ export * from "./freshness";
+ export * from "./canonicalRaceFlow";
+ export * from "./canonicalRaceState";
+ export * from "./progressiveVisibility";
++export * from "./compactRaceProgressTiming";
+diff --git a/src/features/tracking/timing/mapLegProgress.ts b/src/features/tracking/timing/mapLegProgress.ts
+new file mode 100644
+index 0000000..09c919d
+--- /dev/null
++++ b/src/features/tracking/timing/mapLegProgress.ts
+@@ -0,0 +1,31 @@
++import type { AthleteRaceTiming } from './raceSections';
++
++export function mapSport(value: unknown): string {
++  const key = String(value ?? '').toLowerCase().replace(/[_-]/g, ' ');
++  if (/bike|cycl/.test(key)) return 'bike';
++  if (/swim/.test(key)) return 'swim';
++  if (/run/.test(key)) return /run\s*1/.test(key) ? 'run1' : /run\s*2/.test(key) ? 'run2' : 'run';
++  return '';
++}
++
++/** Locate a sport using accepted timing boundaries, never predicted distance. */
++export function mapLegProgress(timing: AthleteRaceTiming | undefined, fallbackLeg?: string) {
++  const sections = timing?.sections ?? [];
++  const active = [...sections].reverse().find(section => section.status === 'in_progress');
++  const section = active?.type === 'leg' ? active : active
++    ? [...sections.slice(0, sections.indexOf(active))].reverse().find(item => item.type === 'leg')
++    : [...sections].reverse().find(item => item.type === 'leg' && item.rows.some(row => row.status === 'valid'));
++  const sport = mapSport(section?.legType ?? section?.title) || mapSport(fallbackLeg);
++  const offsets = (section?.rows ?? []).flatMap(row =>
++    row.cumulativeDistanceKm != null && row.distanceInLegKm != null
++      ? [row.cumulativeDistanceKm - row.distanceInLegKm] : []);
++  const distances = (section?.rows ?? []).flatMap(row => row.distanceInLegKm != null ? [row.distanceInLegKm] : []);
++  const accepted = (section?.rows ?? []).filter(row => row.status === 'valid');
++  return {
++    sport,
++    startKm: offsets.length ? Math.max(0, offsets[0]) : undefined,
++    totalKm: distances.length ? Math.max(...distances) : undefined,
++    officialKm: Math.max(0, ...accepted.map(row => row.distanceInLegKm ?? 0)),
++    atEnd: active?.type === 'transition' || section?.status === 'completed',
++  };
++}
+diff --git a/src/features/tracking/watchlist/hooks/useWatchlist.ts b/src/features/tracking/watchlist/hooks/useWatchlist.ts
+index 7ec0afd..8614e54 100644
+--- a/src/features/tracking/watchlist/hooks/useWatchlist.ts
++++ b/src/features/tracking/watchlist/hooks/useWatchlist.ts
+@@ -1,5 +1,4 @@
+ import { useCallback, useEffect, useMemo, useRef } from "react";
+-import { Alert } from "react-native";
+ import { useQuery } from "@tanstack/react-query";
+ 
+ import { repositories } from "@/core/repositories";
+@@ -253,7 +252,7 @@ function matchesResolvedAthleteId(
+ }
+ 
+ function athleteIdentityValues(athlete: Partial<ResolvedAthlete>): string[] {
+-  return [
++  const values = [
+     athlete.id,
+     athlete.bib,
+     athlete.athleteUid,
+@@ -266,6 +265,21 @@ function athleteIdentityValues(athlete: Partial<ResolvedAthlete>): string[] {
+   ]
+     .map(text)
+     .filter(Boolean);
++  const bibAliases = values.flatMap((value) => {
++    const tagged = value.match(/(?:^|:)bib:([^:]+)/i)?.[1];
++    const imported = value.match(
++      /^(?:import|race|participant|athlete|timing):.+:([^:]+)$/i,
++    )?.[1];
++    const bib = text(tagged || imported);
++    return bib ? [`bib:${bib.toLowerCase().replace(/^0+(?=\d)/, "")}`] : [];
++  });
++  const directBib = text(athlete.bib);
++  if (directBib && !directBib.includes(":")) {
++    bibAliases.push(
++      `bib:${directBib.toLowerCase().replace(/^0+(?=\d)/, "")}`,
++    );
++  }
++  return [...new Set([...values, ...bibAliases])];
+ }
+ 
+ function dedupeResolvedAthletes(
+@@ -496,8 +510,8 @@ export function useWatchlist(
+   const storeIsWatched = useWatchlistStore((s) => s.isWatched);
+   const isAuthenticated = useSession((s) => s.status === "authenticated");
+   const userId = useSession((s) => s.user?.uid);
+-  const pendingAddIdsRef = useRef(new Set<string>());
+-  const pendingRemoveIdsRef = useRef(new Set<string>());
++  const pendingAddIdsRef = useRef(new Map<string, ResolvedAthlete>());
++  const pendingRemoveIdsRef = useRef(new Map<string, ResolvedAthlete>());
+   const accountWatchlistQuery = useQuery({
+     queryKey: ["tracking", "account-watchlist", userId],
+     queryFn: () => repositories.trackingSubscriptions.list(),
+@@ -544,8 +558,13 @@ export function useWatchlist(
+     const optimisticAdds = useWatchlistStore.getState().athletes.filter((athlete) =>
+       pendingAddIdsRef.current.has(resolveAthleteId(athlete)),
+     );
+-    replaceAthletes([...optimisticAdds, ...serverAthletes]);
+-  }, [accountWatchlistQuery.data, hydrated, replaceAthletes]);
++    replaceAthletes(
++      dedupeResolvedAthletes(
++        [...optimisticAdds, ...serverAthletes] as ResolvedAthlete[],
++        eventId,
++      ),
++    );
++  }, [accountWatchlistQuery.data, eventId, hydrated, replaceAthletes]);
+ 
+   useEffect(() => {
+     if (syncWhileVisible && isAuthenticated) {
+@@ -561,16 +580,43 @@ export function useWatchlist(
+         return true;
+       } catch (error) {
+         console.warn("[watchlist] synchronization failed", error);
+-        Alert.alert(
+-          "Watchlist synchronization error",
+-          "Your selection is saved on this device. Notification synchronization will retry when the connection is available.",
+-        );
+         return false;
+       }
+     },
+     [isAuthenticated, refetchAccountWatchlist],
+   );
+ 
++  const retryPendingSynchronization = useCallback(async () => {
++    if (!isAuthenticated) return;
++    let synchronized = false;
++    for (const [key, athlete] of [...pendingAddIdsRef.current.entries()]) {
++      try {
++        await subscribeTrackedAthlete(athlete, eventId);
++        pendingAddIdsRef.current.delete(key);
++        synchronized = true;
++      } catch {
++        // Keep the optimistic device copy and retry on the next visible cycle.
++      }
++    }
++    for (const [key, athlete] of [...pendingRemoveIdsRef.current.entries()]) {
++      try {
++        await unsubscribeTrackedAthlete(athlete, eventId);
++        pendingRemoveIdsRef.current.delete(key);
++        synchronized = true;
++      } catch {
++        // Keep the pending removal and retry on the next visible cycle.
++      }
++    }
++    if (synchronized) await refetchAccountWatchlist();
++  }, [eventId, isAuthenticated, refetchAccountWatchlist]);
++
++  useEffect(() => {
++    if (!syncWhileVisible || !isAuthenticated) return;
++    void retryPendingSynchronization();
++    const interval = setInterval(() => void retryPendingSynchronization(), 8_000);
++    return () => clearInterval(interval);
++  }, [isAuthenticated, retryPendingSynchronization, syncWhileVisible]);
++
+   const addAthlete = useCallback(
+     (athlete: ResolvedAthlete) => {
+       const wasEmpty = useWatchlistStore.getState().athletes.length === 0;
+@@ -590,11 +636,13 @@ export function useWatchlist(
+       };
+       storeAddAthlete(localAthlete);
+       pendingRemoveIdsRef.current.delete(resolvedId);
+-      pendingAddIdsRef.current.add(resolvedId);
+-      void reconcileAfterMutation(subscribeTrackedAthlete(localAthlete, eventId)).then((synchronized) => {
+-        if (synchronized) pendingAddIdsRef.current.delete(resolvedId);
+-      });
+-      if (wasEmpty) void promptTrackedAthleteNotifications();
++      if (isAuthenticated) {
++        pendingAddIdsRef.current.set(resolvedId, localAthlete);
++        void reconcileAfterMutation(subscribeTrackedAthlete(localAthlete, eventId)).then((synchronized) => {
++          if (synchronized) pendingAddIdsRef.current.delete(resolvedId);
++        });
++      }
++      if (wasEmpty && isAuthenticated) void promptTrackedAthleteNotifications();
+     },
+     [eventId, isAuthenticated, reconcileAfterMutation, storeAddAthlete],
+   );
+@@ -609,11 +657,13 @@ export function useWatchlist(
+       if (!existing) return;
+       const resolvedId = resolveAthleteId(existing) || id;
+       pendingAddIdsRef.current.delete(resolvedId);
+-      pendingRemoveIdsRef.current.add(resolvedId);
+       storeToggle(id, eventId);
+-      void reconcileAfterMutation(unsubscribeTrackedAthlete(existing, eventId)).then((synchronized) => {
+-        if (synchronized) pendingRemoveIdsRef.current.delete(resolvedId);
+-      });
++      if (isAuthenticated) {
++        pendingRemoveIdsRef.current.set(resolvedId, existing);
++        void reconcileAfterMutation(unsubscribeTrackedAthlete(existing, eventId)).then((synchronized) => {
++          if (synchronized) pendingRemoveIdsRef.current.delete(resolvedId);
++        });
++      }
+     },
+     [eventId, isAuthenticated, reconcileAfterMutation, storeToggle],
+   );
+diff --git a/src/shared/components/ui/BottomSheet.tsx b/src/shared/components/ui/BottomSheet.tsx
+index 572b1a2..74a2e3e 100644
+--- a/src/shared/components/ui/BottomSheet.tsx
++++ b/src/shared/components/ui/BottomSheet.tsx
+@@ -3,8 +3,8 @@
+  * the React Compiler's immutability lint rule flags as a false positive. Disable
+  * it for this gesture-driven component.
+  */
+-/* eslint-disable react-hooks/immutability */
+-import { useEffect, type ReactNode } from 'react';
++/* eslint-disable react-hooks/immutability, react-hooks/refs */
++import { useCallback, useEffect, useMemo, useRef, type ReactNode } from 'react';
+ import { Modal as RNModal, Platform, Pressable, StyleSheet, View, useWindowDimensions } from 'react-native';
+ import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+ import Animated, {
+@@ -16,7 +16,7 @@ import Animated, {
+   withTiming,
+ } from 'react-native-reanimated';
+ 
+-import { useTheme } from '@/core/theme';
++import { motion, useTheme } from '@/core/theme';
+ 
+ import { Text } from './Text';
+ 
+@@ -57,6 +57,19 @@ export function BottomSheet({
+   const { height: screenHeight } = useWindowDimensions();
+   const sheetHeight = Math.min(height, screenHeight * 0.9);
+   const translateY = useSharedValue(sheetHeight);
++  const gestureSheetHeight = useSharedValue(sheetHeight);
++  const gestureReducedMotion = useSharedValue(reduced ? 1 : 0);
++  const onCloseRef = useRef(onClose);
++  const closeFromGesture = useCallback(() => onCloseRef.current(), []);
++
++  useEffect(() => {
++    onCloseRef.current = onClose;
++  }, [onClose]);
++
++  useEffect(() => {
++    gestureSheetHeight.value = sheetHeight;
++    gestureReducedMotion.value = reduced ? 1 : 0;
++  }, [gestureReducedMotion, gestureSheetHeight, reduced, sheetHeight]);
+ 
+   useEffect(() => {
+     translateY.value = visible
+@@ -68,30 +81,47 @@ export function BottomSheet({
+         : withTiming(sheetHeight, { duration: theme.motion.duration.base });
+   }, [visible, reduced, sheetHeight, translateY, theme.motion.spring, theme.motion.duration.base]);
+ 
+-  const pan = Gesture.Pan()
+-    .activeOffsetY([-8, 8])
+-    .failOffsetX([-24, 24])
+-    .onChange((e) => {
+-      translateY.value = Math.max(0, Math.min(sheetHeight, translateY.value + e.changeY));
+-    })
+-    .onEnd((e) => {
+-      if (translateY.value > sheetHeight * 0.4 || e.velocityY > 800) {
+-        if (reduced) {
+-          translateY.value = sheetHeight;
+-          runOnJS(onClose)();
+-          return;
+-        }
+-        translateY.value = withTiming(
+-          sheetHeight,
+-          { duration: theme.motion.duration.base },
+-          (finished) => {
+-            if (finished) runOnJS(onClose)();
+-          },
+-        );
+-      } else {
+-        translateY.value = withSpring(0, theme.motion.spring);
+-      }
+-    });
++  // Keep one native gesture instance while controlled inputs inside the sheet
++  // update. Recreating the gesture on every search keystroke detaches and
++  // reattaches the Android gesture subtree, which can blur the TextInput and
++  // make the software keyboard repeatedly close and reopen.
++  const pan = useMemo(
++    () =>
++      Gesture.Pan()
++        .activeOffsetY([-8, 8])
++        .failOffsetX([-24, 24])
++        .onChange((e) => {
++          translateY.value = Math.max(
++            0,
++            Math.min(gestureSheetHeight.value, translateY.value + e.changeY),
++          );
++        })
++        .onEnd((e) => {
++          const currentHeight = gestureSheetHeight.value;
++          if (translateY.value > currentHeight * 0.4 || e.velocityY > 800) {
++            if (gestureReducedMotion.value === 1) {
++              translateY.value = currentHeight;
++              runOnJS(closeFromGesture)();
++              return;
++            }
++            translateY.value = withTiming(
++              currentHeight,
++              { duration: motion.duration.base },
++              (finished) => {
++                if (finished) runOnJS(closeFromGesture)();
++              },
++            );
++          } else {
++            translateY.value = withSpring(0, motion.spring);
++          }
++        }),
++    [
++      closeFromGesture,
++      gestureReducedMotion,
++      gestureSheetHeight,
++      translateY,
++    ],
++  );
+ 
+   const sheetStyle = useAnimatedStyle(() => ({ transform: [{ translateY: translateY.value }] }));
+ 
+-- 
+2.50.1 (Apple Git-155)
+

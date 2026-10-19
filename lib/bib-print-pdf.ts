@@ -1,3 +1,5 @@
+import { BIB_PRINT_FONT_CSS } from './bib-print-fonts';
+
 type DownloadPrintPdfOptions = {
   html: string;
   fileName: string;
@@ -12,6 +14,13 @@ const PDF_RASTER_DPI = 300;
 const CSS_PIXELS_PER_INCH = 96;
 const FOUR_UP_BIB_WIDTH_MM = 210;
 const FOUR_UP_BIB_HEIGHT_MM = 148.5;
+
+// Rasterization has its own viewport. Sheet offsets must not move a captured
+// BIB outside that viewport; PDF placement is applied separately below.
+export const PRINT_CAPTURE_ROOT_STYLE = {
+  position: 'relative', left: '0', top: '0', right: 'auto', bottom: 'auto',
+  margin: '0', transform: 'none',
+} as const;
 
 export function fourUpBibPlacement(index: number): { xMm: number; yMm: number } {
   if (!Number.isInteger(index) || index < 0 || index > 3) throw new Error("A four-up sheet has exactly four BIB positions.");
@@ -118,7 +127,7 @@ export async function downloadPrintDocumentPdf(options: DownloadPrintPdfOptions)
     async function capture(element: HTMLElement, pageNumber: number): Promise<string> {
       const bounds = element.getBoundingClientRect();
       if (bounds.width < 1 || bounds.height < 1) throw new Error("The printable page has no visible size. Refresh the page and try again.");
-      const primaryOptions = { backgroundColor: "#ffffff", cacheBust: false, pixelRatio: PDF_RASTER_DPI / CSS_PIXELS_PER_INCH, quality: 0.94, width: Math.ceil(bounds.width), height: Math.ceil(bounds.height), fontEmbedCSS: "" } as const;
+      const primaryOptions = { backgroundColor: "#ffffff", cacheBust: false, pixelRatio: PDF_RASTER_DPI / CSS_PIXELS_PER_INCH, quality: 0.94, width: Math.ceil(bounds.width), height: Math.ceil(bounds.height), fontEmbedCSS: BIB_PRINT_FONT_CSS, style: PRINT_CAPTURE_ROOT_STYLE } as const;
       try {
         return await toJpeg(element, primaryOptions);
       } catch (firstError) {
@@ -134,7 +143,7 @@ export async function downloadPrintDocumentPdf(options: DownloadPrintPdfOptions)
           try {
             await waitForImages(captureHost);
             await waitForPaint(window);
-            return await toJpeg(clone, { ...primaryOptions, pixelRatio: 2, quality: 0.92, skipFonts: true });
+            return await toJpeg(clone, { ...primaryOptions, pixelRatio: 2, quality: 0.92 });
           } finally {
             captureHost.remove();
           }

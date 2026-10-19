@@ -10,7 +10,9 @@ export async function ensureFeibotLiveSyncSchedule(eventId: string, enabled: boo
     const response = await env.CANONICAL_CHANGE_HUB.getByName(eventId).fetch('https://canonical-change.internal/configure-live-sync', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ eventId, enabled, intervalMs: 30_000 }),
+      // Feibot applies a shared request limit across result endpoints. Per-feed
+      // pacing in the sync worker plus a one-minute alarm prevents 429 bursts.
+      body: JSON.stringify({ eventId, enabled, intervalMs: 60_000 }),
     });
     if (!response.ok) throw new Error(`Canonical change hub returned ${response.status}`);
   } catch (error) {

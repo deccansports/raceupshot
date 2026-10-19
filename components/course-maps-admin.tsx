@@ -8,6 +8,7 @@ import type {
   EventCourseMap,
 } from "@/packages/contracts/src";
 import { COURSE_MAP_TYPES } from "@/packages/contracts/src";
+import { resolvedTicketDisciplines, type EventTicketDefinition } from "@/lib/event-ticket-definition";
 import { CheckCircle2, FileUp, GripVertical, Link2, Loader2, Map, Pencil, Plus, RefreshCw, Save, Trash2, X } from "lucide-react";
 import { ChangeEvent, DragEvent, useEffect, useMemo, useState } from "react";
 
@@ -44,23 +45,44 @@ type DraftMap = Omit<EventCourseMap, "mapId" | "eventId" | "updatedAt" | "displa
   fileName: string;
 };
 
-function emptyDraft(category: string): DraftMap {
+function primaryMapType(ticket?: EventTicketDefinition): CourseMapType {
+  const first = ticket ? resolvedTicketDisciplines(ticket)[0] : undefined;
+  return first ?? "RACE_COURSE";
+}
+
+function allowedMapTypes(ticket?: EventTicketDefinition): CourseMapType[] {
+  if (!ticket || ticket.enabledDisciplines === undefined) return [...COURSE_MAP_TYPES];
+  const disciplines = new Set(resolvedTicketDisciplines(ticket));
+  return COURSE_MAP_TYPES.filter((type) =>
+    type === "RACE_COURSE"
+    || (type === "SWIM" && disciplines.has("SWIM"))
+    || (type === "BIKE" && disciplines.has("BIKE"))
+    || (["RUN", "RUN_1", "RUN_2"].includes(type) && disciplines.has("RUN"))
+    || !["SWIM", "BIKE", "RUN", "RUN_1", "RUN_2"].includes(type),
+  );
+}
+
+function emptyDraft(category: string, ticket?: EventTicketDefinition): DraftMap {
+  const mapType = primaryMapType(ticket);
   return {
+    ticketId: ticket?.id,
+    providerContestUuid: ticket?.providerContestUuid || undefined,
     category,
-    mapName: "Race Course",
-    mapType: "RACE_COURSE",
+    mapName: TYPE_LABELS[mapType],
+    mapType,
     fileName: "",
+    fileFormat: "GPX",
     gpxUrl: undefined,
     points: [],
     distanceKm: null,
     description: "",
     cutoffSeconds: null,
-    routeColor: TYPE_COLORS.RACE_COURSE!,
+    routeColor: TYPE_COLORS[mapType] ?? TYPE_COLORS.RACE_COURSE!,
     visibility: { web: true, mobile: true, public: true },
   };
 }
 
-function pointElements(document: XMLDocument) {
+function gpxPointElements(document: XMLDocument) {
   const names = ["trkpt", "rtept", "wpt"];
   return names.flatMap((name) => Array.from(document.getElementsByTagNameNS("*", name)));
 }
@@ -71,10 +93,18 @@ function parsedNumber(value: string | null) {
   return Number.isFinite(number) ? number : undefined;
 }
 
-function parseGpx(gpxData: string): { gpxData: string; points: CoursePoint[] } {
-  const document = new DOMParser().parseFromString(gpxData, "application/xml");
-  if (document.querySelector("parsererror")) throw new Error("The GPX file contains invalid XML.");
-  const points = pointElements(document).map((element) => {
+function simplifyUpload(points: CoursePoint[]) {
+  const maximumPoints = 1_200;
+  return points.length <= maximumPoints
+    ? points
+    : Array.from({ length: maximumPoints }, (_, index) => points[Math.round(index * (points.length - 1) / (maximumPoints - 1))]);
+}
+
+export function parseCourseFile(source: string, requestedFormat?: "GPX" | "KML"): { gpxData: string; points: CoursePoint[]; fileFormat: "GPX" | "KML" } {
+  const document = new DOMParser().parseFromString(source, "application/xml");
+  if (document.querySelector("parsererror")) throw new Error("The course file contains invalid XML.");
+  const fileFormat = requestedFormat ?? (document.getElementsByTagNameNS("*", "kml").length ? "KML" : "GPX");
+  const gpxPoints = gpxPointElements(document).map((element) => {
     const latitude = parsedNumber(element.getAttribute("lat"));
     const longitude = parsedNumber(element.getAttribute("lon"));
     const elevation = parsedNumber(element.getElementsByTagNameNS("*", "ele")[0]?.textContent ?? null);
@@ -84,18 +114,34 @@ function parseGpx(gpxData: string): { gpxData: string; points: CoursePoint[] } {
       ...(elevation === undefined ? {} : { elevation }),
     };
   }).filter((point): point is CoursePoint => Boolean(point));
-  if (points.length < 2) throw new Error("The GPX file must contain at least two track, route, or waypoint coordinates.");
-  const maximumPoints = 5_000;
-  const simplified = points.length <= maximumPoints
-    ? points
-    : Array.from({ length: maximumPoints }, (_, index) => points[Math.round(index * (points.length - 1) / (maximumPoints - 1))]);
-  return { gpxData, points: simplified };
+  const lineStrings = Array.from(document.getElementsByTagNameNS("*", "LineString"));
+  const coordinateElements = lineStrings.length
+    ? lineStrings.flatMap((line) => Array.from(line.getElementsByTagNameNS("*", "coordinates")))
+    : Array.from(document.getElementsByTagNameNS("*", "coordinates"));
+  const kmlCoordinatePoints = coordinateElements.flatMap((element) =>
+    (element.textContent ?? "").trim().split(/\s+/).flatMap((coordinate) => {
+      const [longitude, latitude, elevation] = coordinate.split(",").map(Number);
+      return Number.isFinite(latitude) && Number.isFinite(longitude)
+        ? [{ latitude, longitude, ...(Number.isFinite(elevation) ? { elevation } : {}) }]
+        : [];
+    }),
+  );
+  const kmlTrackPoints = Array.from(document.getElementsByTagNameNS("*", "coord")).flatMap((element) => {
+    const [longitude, latitude, elevation] = (element.textContent ?? "").trim().split(/\s+/).map(Number);
+    return Number.isFinite(latitude) && Number.isFinite(longitude)
+      ? [{ latitude, longitude, ...(Number.isFinite(elevation) ? { elevation } : {}) }]
+      : [];
+  });
+  const points = fileFormat === "KML" ? [...kmlCoordinatePoints, ...kmlTrackPoints] : gpxPoints;
+  if (points.length < 2) throw new Error(`${fileFormat} must contain at least two ordered course coordinates.`);
+  return { gpxData: source, points: simplifyUpload(points), fileFormat };
 }
 
-async function readGpx(file: File): Promise<{ gpxData: string; points: CoursePoint[] }> {
-  if (!file.name.toLowerCase().endsWith(".gpx") && !["application/gpx+xml", "application/xml", "text/xml"].includes(file.type)) throw new Error("Choose a GPX file.");
-  if (file.size > 4_000_000) throw new Error("GPX files must be smaller than 4 MB.");
-  return parseGpx(await file.text());
+async function readCourseFile(file: File): Promise<{ gpxData: string; points: CoursePoint[]; fileFormat: "GPX" | "KML" }> {
+  const extension = file.name.toLowerCase().split(".").at(-1);
+  if (extension !== "gpx" && extension !== "kml") throw new Error("Choose a GPX or KML course file.");
+  if (file.size > 4_000_000) throw new Error("Course files must be smaller than 4 MB.");
+  return parseCourseFile(await file.text(), extension.toUpperCase() as "GPX" | "KML");
 }
 
 export function CourseMapsAdmin({
@@ -103,6 +149,7 @@ export function CourseMapsAdmin({
   eventName,
   sport,
   categories,
+  tickets = [],
   initialCollection,
   onSaved,
   splitCounts = {},
@@ -111,6 +158,7 @@ export function CourseMapsAdmin({
   eventName: string;
   sport: string;
   categories: string[];
+  tickets?: EventTicketDefinition[];
   initialCollection: EventCourseCollection;
   onSaved?: (collection: EventCourseCollection) => void;
   splitCounts?: Partial<Record<CourseMapType, number>>;
@@ -126,15 +174,16 @@ export function CourseMapsAdmin({
     return () => window.removeEventListener("raceupshot:categories-synced", handleCategories);
   }, []);
   const initialCategoryOptions = useMemo(
-    () => [...new Set(["Overall", ...syncedCategories, ...initialCollection.maps.map((map) => map.category)].filter(Boolean))],
-    [syncedCategories, initialCollection.maps],
+    () => [...new Set([...tickets.map((ticket) => ticket.name), ...syncedCategories, "Overall", ...initialCollection.maps.map((map) => map.category)].filter(Boolean))],
+    [syncedCategories, tickets, initialCollection.maps],
   );
   const [maps, setMaps] = useState(initialCollection.maps);
   const categoryOptions = useMemo(
-    () => [...new Set(["Overall", ...syncedCategories, ...maps.map((map) => map.category)].filter(Boolean))],
-    [syncedCategories, maps],
+    () => [...new Set([...tickets.map((ticket) => ticket.name), ...syncedCategories, "Overall", ...maps.map((map) => map.category)].filter(Boolean))],
+    [syncedCategories, tickets, maps],
   );
-  const [draft, setDraft] = useState<DraftMap>(() => emptyDraft(initialCategoryOptions[0] || "Overall"));
+  const firstCategory = initialCategoryOptions[0] || "Overall";
+  const [draft, setDraft] = useState<DraftMap>(() => emptyDraft(firstCategory, tickets.find((ticket) => ticket.name === firstCategory)));
   const [selectedCategory, setSelectedCategory] = useState(initialCategoryOptions[0] || "Overall");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draggedId, setDraggedId] = useState<string | null>(null);
@@ -168,15 +217,15 @@ export function CourseMapsAdmin({
     return () => controller.abort();
   }, [eventId, initialCollection.updatedAt]);
 
-  async function chooseGpx(event: ChangeEvent<HTMLInputElement>) {
+  async function chooseCourseFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
     setError("");
     try {
-      const parsed = await readGpx(file);
+      const parsed = await readCourseFile(file);
       setDraft((current) => ({ ...current, ...parsed, fileName: file.name }));
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Unable to read the GPX file.");
+      setError(reason instanceof Error ? reason.message : "Unable to read the course file.");
     } finally {
       event.target.value = "";
     }
@@ -184,18 +233,19 @@ export function CourseMapsAdmin({
 
   async function loadGpxUrl() {
     const url=draft.gpxUrl?.trim();
-    if(!url){setError("Paste a GPX URL first.");return;}
+    if(!url){setError("Paste a GPX or KML URL first.");return;}
     setLoadingUrl(true);setError("");
     try{
       const response=await fetch(url,{cache:"no-store",signal:AbortSignal.timeout(20_000)});
-      if(!response.ok)throw new Error(`GPX URL returned HTTP ${response.status}.`);
+      if(!response.ok)throw new Error(`Course URL returned HTTP ${response.status}.`);
       const data=await response.text();
-      if(data.length>4_000_000)throw new Error("GPX files must be smaller than 4 MB.");
-      const parsed=parseGpx(data);
+      if(data.length>4_000_000)throw new Error("Course files must be smaller than 4 MB.");
       const fileName=new URL(url).pathname.split("/").filter(Boolean).at(-1)||"remote-course.gpx";
+      const extension=fileName.toLowerCase().split(".").at(-1);
+      const parsed=parseCourseFile(data,extension==="kml"?"KML":extension==="gpx"?"GPX":undefined);
       setDraft(current=>({...current,...parsed,fileName,gpxUrl:url}));
-      setMessage("GPX URL loaded. Review the route, then add or update the map.");
-    }catch(reason){setError(reason instanceof Error?reason.message:"Unable to load the GPX URL.");}
+      setMessage(`${parsed.fileFormat} URL loaded. Review the route, then add or update the map.`);
+    }catch(reason){setError(reason instanceof Error?reason.message:"Unable to load the course URL.");}
     finally{setLoadingUrl(false);}
   }
 
@@ -218,6 +268,24 @@ export function CourseMapsAdmin({
       routeColor: TYPE_COLORS[mapType] || current.routeColor,
       customType: mapType === "CUSTOM" ? current.customType : undefined,
     }));
+  }
+
+  function changeTicketCategory(category: string, updateSelectedCategory = false) {
+    const ticket = tickets.find((item) => item.name === category);
+    if (updateSelectedCategory) setSelectedCategory(category);
+    setDraft((current) => {
+      const supported = allowedMapTypes(ticket);
+      const mapType = supported.includes(current.mapType) ? current.mapType : primaryMapType(ticket);
+      return {
+        ...current,
+        category,
+        ticketId: ticket?.id,
+        providerContestUuid: ticket?.providerContestUuid || undefined,
+        mapType,
+        mapName: editingId ? current.mapName : TYPE_LABELS[mapType],
+        routeColor: TYPE_COLORS[mapType] ?? current.routeColor,
+      };
+    });
   }
 
   async function persistMaps(nextMaps: EventCourseMap[], successMessage: string) {
@@ -255,7 +323,7 @@ export function CourseMapsAdmin({
       return;
     }
     if (draft.points.length < 2 || !draft.fileName) {
-      setError("Upload a valid GPX file for this map.");
+      setError("Upload a valid GPX or KML file for this map.");
       return;
     }
     const now = new Date().toISOString();
@@ -273,7 +341,7 @@ export function CourseMapsAdmin({
     const action = editingId ? "updated" : "added";
     if (await persistMaps(nextMaps, `Map ${action} and published to web and mobile.`)) {
       setEditingId(null);
-      setDraft(emptyDraft(draft.category));
+      setDraft(emptyDraft(draft.category, tickets.find((ticket) => ticket.id === draft.ticketId || ticket.name === draft.category)));
     }
   }
 
@@ -281,11 +349,14 @@ export function CourseMapsAdmin({
     setEditingId(map.mapId);
     setDraft({
       mapId: map.mapId,
+      ticketId: map.ticketId,
+      providerContestUuid: map.providerContestUuid,
       category: map.category,
       mapName: map.mapName,
       mapType: map.mapType,
       customType: map.customType,
       fileName: map.fileName,
+      fileFormat: map.fileFormat ?? (map.fileName.toLowerCase().endsWith(".kml") ? "KML" : "GPX"),
       gpxUrl: map.gpxUrl,
       gpxData: map.gpxData,
       points: map.points,
@@ -325,6 +396,8 @@ export function CourseMapsAdmin({
     updatedAt: new Date().toISOString(),
   };
   const selectedMaps=maps.filter(map=>map.category===selectedCategory);
+  const draftTicket=tickets.find(ticket=>ticket.id===draft.ticketId||ticket.name===draft.category);
+  const draftMapTypes=[...new Set([...allowedMapTypes(draftTicket), ...(editingId?[draft.mapType]:[])])];
   const splitCount=(map:EventCourseMap)=>splitCounts[map.mapType]??(map.mapType==="RACE_COURSE"?Object.values(splitCounts).reduce((total,value)=>total+(value??0),0):0);
   const formatDistance=(value:number|null|undefined)=>value==null?"—":`${value.toLocaleString()} km`;
   const formatCutoff=(value:number|null|undefined)=>value==null?"—":`${Math.floor(value/3600)}:${String(Math.floor(value%3600/60)).padStart(2,"0")}:${String(value%60).padStart(2,"0")}`;
@@ -332,38 +405,38 @@ export function CourseMapsAdmin({
   return (
     <section className="admin-card course-maps-admin" id="course-maps">
       <div className="admin-card-head">
-        <div><h2><Map /> Course map assets</h2><p>Upload GPX files or paste GPX URLs. Changes are saved to this Race Upshot event configuration.</p></div>
+        <div><h2><Map /> Course map assets</h2><p>Assign a separate GPX or KML route to each ticket or contest. Mobile tracking loads only the selected athlete’s course.</p></div>
         <span className="status-pill">{maps.length} map{maps.length === 1 ? "" : "s"}</span>
       </div>
-      <div className="bergman-course-selectors"><label><span>SELECTED RACE UPSHOT EVENT</span><select disabled><option>{eventName}</option></select></label><label><span>CATEGORY</span><select value={selectedCategory} onChange={event=>{setSelectedCategory(event.target.value);setDraft(current=>({...current,category:event.target.value}));}}>{categoryOptions.map(category=><option key={category}>{category}</option>)}</select></label></div>
-      <div className="bergman-course-category"><header><div><small>SELECTED CATEGORY</small><h3>{selectedCategory}</h3><span>{selectedCategory} · Race Upshot event category</span></div><div><span className="status-pill">{selectedMaps.length?"Course maps loaded":"No maps saved yet"}</span><button className="button" disabled={reloading} onClick={()=>void reloadSavedMaps()}>{reloading?<Loader2 className="spin"/>:<RefreshCw/>} Load saved maps</button></div></header>
-        {selectedMaps.length?<><div className="bergman-course-summaries">{selectedMaps.map(map=><article key={`${map.mapId}-summary`}><small>{TYPE_LABELS[map.mapType]} Distance</small><b>{formatDistance(map.distanceKm)}</b><p>{map.description||"—"}</p><code>{map.gpxUrl||map.fileName}</code></article>)}</div><div className="bergman-course-summaries compact">{selectedMaps.map(map=><article key={`${map.mapId}-splits`}><small>{TYPE_LABELS[map.mapType]} Splits</small><b>{splitCount(map)}</b><p>From saved Race Flow configuration</p></article>)}</div></>:<p className="admin-empty">Add a GPX asset for this category below.</p>}
+      <div className="bergman-course-selectors"><label><span>SELECTED RACE UPSHOT EVENT</span><select disabled><option>{eventName}</option></select></label><label><span>TICKET / CONTEST</span><select value={selectedCategory} onChange={event=>changeTicketCategory(event.target.value,true)}>{categoryOptions.map(category=><option key={category}>{category}</option>)}</select></label></div>
+      <div className="bergman-course-category"><header><div><small>SELECTED TICKET / CONTEST</small><h3>{selectedCategory}</h3><span>{selectedCategory} · Race Upshot course assignment</span></div><div><span className="status-pill">{selectedMaps.length?"Course maps loaded":"No maps saved yet"}</span><button className="button" disabled={reloading} onClick={()=>void reloadSavedMaps()}>{reloading?<Loader2 className="spin"/>:<RefreshCw/>} Load saved maps</button></div></header>
+        {selectedMaps.length?<><div className="bergman-course-summaries">{selectedMaps.map(map=><article key={`${map.mapId}-summary`}><small>{TYPE_LABELS[map.mapType]} Distance</small><b>{formatDistance(map.distanceKm)}</b><p>{map.description||"—"}</p><code>{map.gpxUrl||map.fileName}</code></article>)}</div><div className="bergman-course-summaries compact">{selectedMaps.map(map=><article key={`${map.mapId}-splits`}><small>{TYPE_LABELS[map.mapType]} Splits</small><b>{splitCount(map)}</b><p>From saved Race Flow configuration</p></article>)}</div></>:<p className="admin-empty">Add a GPX or KML asset for this ticket below.</p>}
       </div>
-      <div className="course-map-recommendation"><b>Recommended for {sport}</b><span>{sport.toLowerCase().includes("tri") ? "Swim · Bike · Run · Combined" : sport.toLowerCase().includes("cycl") ? "Bike Course · Alternate Route" : "Race Course · Alternate Route · Aid Stations"}</span></div>
+      <div className="course-map-recommendation"><b>Recommended for {sport}</b><span>GPX is preferred for routes and elevation. KML is accepted and converted to compact mobile geometry.</span></div>
       {message && <div className="success-banner"><CheckCircle2 /> {message}</div>}
       {error && <div className="success-banner cms-error-banner">{error}</div>}
 
       <div className="course-map-admin-grid">
         <div className="course-map-form" id="course-map-editor">
-          <div className="section-heading"><div><span className="eyebrow">{editingId ? "EDIT MAP" : "ADD MAP"}</span><h3>{editingId ? draft.mapName : "Upload a GPX route"}</h3></div>{editingId && <button type="button" onClick={() => { setEditingId(null); setDraft(emptyDraft(draft.category)); }}><X /> Cancel</button>}</div>
+          <div className="section-heading"><div><span className="eyebrow">{editingId ? "EDIT MAP" : "ADD MAP"}</span><h3>{editingId ? draft.mapName : "Upload a course route"}</h3></div>{editingId && <button type="button" onClick={() => { setEditingId(null); setDraft(emptyDraft(draft.category, tickets.find((ticket) => ticket.id === draft.ticketId || ticket.name === draft.category))); }}><X /> Cancel</button>}</div>
           <div className="form-grid">
             <div className="field">
-              <label>Category</label>
-              <select value={categoryOptions.includes(draft.category) ? draft.category : ""} onChange={(event) => setDraft({ ...draft, category: event.target.value })}>
+              <label>Ticket / contest</label>
+              <select value={categoryOptions.includes(draft.category) ? draft.category : ""} onChange={(event) => changeTicketCategory(event.target.value)}>
                 <option value="">Custom category…</option>
                 {categoryOptions.map((category) => <option value={category} key={category}>{category}</option>)}
               </select>
               {!categoryOptions.includes(draft.category) && <input value={draft.category} onChange={(event) => setDraft({ ...draft, category: event.target.value })} placeholder="Half Marathon or Bergman 102" />}
             </div>
             <div className="field"><label>Map name</label><input value={draft.mapName} onChange={(event) => setDraft({ ...draft, mapName: event.target.value })} placeholder="Race Course" /></div>
-            <div className="field"><label>Map type</label><select value={draft.mapType} onChange={(event) => changeType(event.target.value as CourseMapType)}>{COURSE_MAP_TYPES.map((type) => <option key={type} value={type}>{TYPE_LABELS[type]}</option>)}</select></div>
+            <div className="field"><label htmlFor="course-map-type">Map type</label><select id="course-map-type" value={draft.mapType} onChange={(event) => changeType(event.target.value as CourseMapType)}>{draftMapTypes.map((type) => <option key={type} value={type}>{TYPE_LABELS[type]}</option>)}</select><small>{draftTicket?.enabledDisciplines !== undefined ? `${resolvedTicketDisciplines(draftTicket).join(" · ") || "No sport legs selected"} for this ticket` : "Legacy ticket: all map types available"}</small></div>
             {draft.mapType === "CUSTOM" && <div className="field"><label>Custom map type</label><input value={draft.customType || ""} onChange={(event) => setDraft({ ...draft, customType: event.target.value })} placeholder="Parking, Expo Area…" /></div>}
             <div className="field"><label>Route color</label><div className="course-color-field"><input type="color" value={draft.routeColor} onChange={(event) => setDraft({ ...draft, routeColor: event.target.value })} /><code>{draft.routeColor}</code></div></div>
             <div className="field"><label>Segment distance (KM)</label><input type="number" min="0" step="0.1" value={draft.distanceKm??""} onChange={event=>setDraft({...draft,distanceKm:event.target.value?Number(event.target.value):null})} placeholder="0.0"/></div>
             <div className="field"><label>Cutoff (seconds)</label><input type="number" min="0" value={draft.cutoffSeconds??""} onChange={event=>setDraft({...draft,cutoffSeconds:event.target.value?Number(event.target.value):null})} placeholder="No cutoff"/></div>
-            <div className="field"><label>GPX file</label><label className="course-file-button"><FileUp /> {draft.fileName || "Choose GPX"}<input type="file" accept=".gpx,application/gpx+xml,application/xml,text/xml" onChange={(event) => void chooseGpx(event)} /></label></div>
+            <div className="field"><label>Course file</label><label className="course-file-button"><FileUp /> {draft.fileName || "Choose GPX or KML"}<input type="file" accept=".gpx,.kml,application/gpx+xml,application/vnd.google-earth.kml+xml,application/xml,text/xml" onChange={(event) => void chooseCourseFile(event)} /></label></div>
           </div>
-          <div className="bergman-map-url"><label><span>GPX URL</span><div><input type="url" value={draft.gpxUrl??""} onChange={event=>setDraft({...draft,gpxUrl:event.target.value||undefined})} placeholder="Paste a public GPX URL"/><button className="button" type="button" disabled={loadingUrl||!draft.gpxUrl} onClick={()=>void loadGpxUrl()}>{loadingUrl?<Loader2 className="spin"/>:<Link2/>} Load URL</button></div></label><label><span>{TYPE_LABELS[draft.mapType]} Description</span><textarea rows={3} value={draft.description??""} onChange={event=>setDraft({...draft,description:event.target.value})} placeholder={`Describe the ${TYPE_LABELS[draft.mapType].toLowerCase()} leg...`}/></label></div>
+          <div className="bergman-map-url"><label><span>GPX / KML URL</span><div><input type="url" value={draft.gpxUrl??""} onChange={event=>setDraft({...draft,gpxUrl:event.target.value||undefined})} placeholder="Paste a public GPX or KML URL"/><button className="button" type="button" disabled={loadingUrl||!draft.gpxUrl} onClick={()=>void loadGpxUrl()}>{loadingUrl?<Loader2 className="spin"/>:<Link2/>} Load URL</button></div></label><label><span>{TYPE_LABELS[draft.mapType]} Description</span><textarea rows={3} value={draft.description??""} onChange={event=>setDraft({...draft,description:event.target.value})} placeholder={`Describe the ${TYPE_LABELS[draft.mapType].toLowerCase()} leg...`}/></label></div>
           <div className="course-visibility">
             {(["web", "mobile", "public"] as const).map((surface) => <label key={surface}><input type="checkbox" checked={draft.visibility[surface]} onChange={(event) => setDraft({ ...draft, visibility: { ...draft.visibility, [surface]: event.target.checked } })} /><span>{surface}</span></label>)}
           </div>

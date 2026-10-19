@@ -81,9 +81,9 @@ export function AthleteWaivers({ user, displayName }: { user: User | null; displ
         method: "POST", headers: await headers(true),
         body: JSON.stringify({ participantId: waiver.participantId, signatureName: draft.signatureName, accepted: draft.accepted }),
       });
-      const body = await response.json() as { success?: boolean; error?: { message?: string } };
+      const body = await response.json() as { success?: boolean; data?: { message?: string }; error?: { message?: string } };
       if (!response.ok || !body.success) throw new Error(body.error?.message || "Unable to send the waiver OTP.");
-      update(waiver.participantId, { otpSent: true, message: "Verification OTP sent to your registered email." });
+      update(waiver.participantId, { otpSent: true, message: body.data?.message || "Verification OTP sent." });
     } catch (error) {
       update(waiver.participantId, { error: error instanceof Error ? error.message : "Unable to send the waiver OTP." });
     } finally {
@@ -111,7 +111,7 @@ export function AthleteWaivers({ user, displayName }: { user: User | null; displ
 
   return (
     <section className="athlete-waivers-card">
-      <div className="athlete-waivers-heading"><FileCheck2 /><div><span className="eyebrow">EVENT WAIVERS</span><h2>Sign and download waivers</h2><p>A dedicated email OTP confirms each electronic signature.</p></div></div>
+      <div className="athlete-waivers-heading"><FileCheck2 /><div><span className="eyebrow">EVENT WAIVERS</span><h2>Sign and download waivers</h2><p>A dedicated WhatsApp OTP confirms each electronic signature, with email fallback when required.</p></div></div>
       {loading && <div className="account-loading"><span className="auth-spinner" /> Loading registered events…</div>}
       {loadError && <div className="auth-alert auth-alert-error">{loadError}</div>}
       {!loading && !loadError && !waivers.length && <p className="athlete-waivers-empty">No unsigned or saved event waivers are connected to this athlete account.</p>}

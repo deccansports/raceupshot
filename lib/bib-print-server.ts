@@ -5,30 +5,60 @@ import * as bwipjs from "@bwip-js/generic";
 import { getAdminParticipantRoster } from "./participant-chip-assignments";
 import { getEventBySlug } from "./raceupshot-repository";
 import { eventTicketDefinitions } from "./event-ticket-definition";
-import { defaultPrintTemplate, fixedPrintLayout, matchesPrintGender, PRINT_FONT_FAMILIES, printElementText, renderPrintHtml, repairStandardA5Template, selectPrintParticipants, validatedPrintImage, type PrintParticipant, type PrintTemplate, type PrintTemplateElement } from "./bib-print-layout";
+import { defaultPrintTemplate, fixedPrintLayout, matchesPrintGender, PRINT_DATA_ELEMENT_KINDS, PRINT_FONT_FAMILIES, printElementText, renderPrintHtml, repairStandardA5Template, selectPrintParticipants, validatedPrintImage, type PrintParticipant, type PrintTemplate, type PrintTemplateElement } from "./bib-print-layout";
 
 type JsonRecord = Record<string, unknown>;
-const elementKinds = new Set(["BIB_NUMBER", "PARTICIPANT_NAME", "FIRST_NAME", "LAST_NAME", "RACE_CATEGORY", "SUBCATEGORY", "GENDER", "AGE_GROUP", "GENDER_AGE_GROUP", "CLUB_NAME", "COUNTRY_FLAG", "TSHIRT_SIZE", "EMERGENCY_CONTACT", "TIMING_CHIP", "ATHLETE_BAND_CODE", "PARTICIPANT_QR", "ATHLETE_BAND_QR", "BARCODE", "STATIC_TEXT", "STATIC_IMAGE", "RECTANGLE", "ELLIPSE", "LINE"]);
+const elementKinds = new Set([...PRINT_DATA_ELEMENT_KINDS, "STATIC_TEXT", "STATIC_IMAGE", "RECTANGLE", "ELLIPSE", "LINE"]);
 const key = (eventId: string) => `raceupshot:print:event:${encodeURIComponent(eventId)}:templates:v1`;
 const value = (row: JsonRecord, ...names: string[]) => names.map((name) => row[name]).find((item) => item !== null && item !== undefined && String(item).trim())?.toString().trim() ?? "";
 
 export function normalizePrintRoster(eventId: string, rows: JsonRecord[]): PrintParticipant[] {
-  return rows.filter((row) => !value(row, "eventId", "event_id") || value(row, "eventId", "event_id") === eventId).map((row) => ({
+  return rows.filter((row) => !value(row, "eventId", "event_id") || value(row, "eventId", "event_id") === eventId).map((row) => {
+    const chipAssignment = row.chipAssignment && typeof row.chipAssignment === "object" && !Array.isArray(row.chipAssignment)
+      ? row.chipAssignment as JsonRecord
+      : {};
+    return ({
     eventId,
-    participantId: value(row, "participantUid", "participantUuid", "participant_uuid", "id"),
+    participantId: value(row, "participantUid", "participantUuid", "participant_uuid", "profileParticipantId", "personParticipantId", "participantId", "id"),
+    registrationId: value(row, "registrationId", "registration_id"),
     bookingId: value(row, "bookingId", "booking_id") || null,
     ticketId: value(row, "ticketId", "ticket_id", "contestId"),
     ticketName: value(row, "ticketName", "contestName", "category"),
     subcategoryId: value(row, "subcategoryId", "subCategoryId", "ageGroupId") || null,
+    subcategoryName: value(row, "distanceSubCategory", "subCategory", "sourceCategory"),
     bibNumber: value(row, "bib", "bibNumber", "bib_number"),
-    name: value(row, "nameOnBib", "fullName", "name", "displayName"), gender: value(row, "gender"),
-    ageGroup: value(row, "ageGroup", "age_group"), club: value(row, "club", "clubName"),
-    country: value(row, "country", "countryCode"), tshirtSize: value(row, "tshirtSize", "tShirtSize"),
-    emergencyContact: value(row, "emergencyContact", "emergencyPhone"),
-    chipCode: value(row, "chipCode", "chip_code"), athleteBandCode: value(row, "athleteBandCode", "athlete_band_code"),
+    name: value(row, "nameOnBib", "fullName", "name", "displayName", "athleteName"), gender: value(row, "gender", "sex"),
+    ageGroup: value(row, "ageCategory", "ageGroup", "age_group"), club: value(row, "affiliatedClub", "club", "clubName"),
+    country: value(row, "country", "countryName", "countryCode"), tshirtSize: value(row, "tshirtSize", "tShirtSize", "t_shirt_size", "jerseySize", "shirtSize"),
+    emergencyContact: value(row, "emergencyContact", "emergency_contact", "emergencyMobile", "emergencyPhone"),
+    emergencyContactName: value(row, "emergencyContactName", "emergencyName"),
+    chipCode: value(chipAssignment, "chipCode") || value(row, "chipCode", "chip_code"), athleteBandCode: value(row, "athleteBandCode", "athlete_band_code", "athleteBand", "bandCode"),
     registrationStatus: value(row, "registrationStatus", "bookingStatus", "participantStatus"),
+    email: value(row, "email", "emailAddress", "rosterEmail"), mobile: value(row, "mobile", "mobileNumber", "phone", "phoneNumber", "contactNumber", "whatsapp"),
+    participationMode: value(row, "participationMode", "contestParticipationType") || "INDIVIDUAL",
+    relayTeamName: value(row, "relayTeamName", "teamName", "relay_team_name"), relayTeamSize: value(row, "relayTeamSize"),
+    relayMemberNumber: value(row, "relayMemberNumber"), relayMemberRole: value(row, "relayMemberRole"),
+    sessionId: value(row, "sessionId", "session_id"), sessionName: value(row, "sessionName", "session"),
+    scheduledStart: value(row, "scheduledStartAt", "sessionStartAt"),
+    dateOfBirth: value(row, "dateOfBirth", "dob", "birthDate"), age: value(row, "age"), bloodGroup: value(row, "bloodGroup", "blood_group"),
+    address: value(row, "address", "addressLine1", "streetAddress"), city: value(row, "city", "district"),
+    state: value(row, "state", "stateName"), pincode: value(row, "pincode", "pinCode", "postalCode", "zipCode"),
+    ticketStatus: value(row, "ticketStatus"), belSeason: value(row, "belSeason", "bel_season"), belRecognition: value(row, "belRecognition", "bel_recognition"),
+    ticketPrice: value(row, "ticketPrice", "ticket_price"), amountPaid: value(row, "amountPaid", "amountPaidInr", "paidAmount"),
+    balanceAmount: value(row, "balanceAmount", "balance_amount"), taxAmount: value(row, "taxAmount", "tax_amount"), processingFee: value(row, "processingFee", "processing_fee"),
+    transactionId: value(row, "transactionId", "transactionID", "paymentTransactionId"),
+    registeredAt: value(row, "registeredAt", "registrationDate", "createdAt", "rosterImportedAt"), actualRaceDate: value(row, "actualRaceDate", "raceDate"),
+    updatedAt: value(row, "updatedAt", "lastUpdatedAt", "rosterImportedAt"), waiverStatus: value(row, "waiverStatus"),
+    waiverCheckedInAt: value(row, "checkedInAt", "waiverCheckedInAt"), waiverVolunteer: value(row, "waiverVolunteer", "waiverVolunteerName", "checkedInBy"),
+    waiverCounter: value(row, "waiverCounter", "waiverCounterName", "checkInCounter"), handoverToName: value(row, "handoverToName", "handoverName"),
+    handoverToMobile: value(row, "handoverToMobile", "handoverMobile"), bikeCheckIn: value(row, "bikeCheckedInAt", "bikeCheckIn"),
+    bikeCheckInRemarks: value(row, "bikeCheckInRemarks", "bikeCheckinRemarks", "bikeRemarks"), helmetChecked: value(row, "helmetChecked"),
+    bikeCheckOut: value(row, "bikeCheckedOutAt", "bikeCheckOut"), lockerNumber: value(row, "lockerNumber", "lockerNo"),
+    medalIssued: value(row, "medalIssued"), finisherJerseyIssued: value(row, "finisherJerseyIssued", "jerseyIssued"), foodIssued: value(row, "foodIssued"),
+    identityProof: value(row, "identityProof", "idProofUrl", "idProofURL", "id_proof_url", "idProof"), deferred: value(row, "deferred"),
+    deferredFromPune: value(row, "deferredFromPune", "deferred_from_pune"), cancellationReason: value(row, "cancellationReason", "cancellation_reason"),
     active: row.active !== false && row.isActive !== false,
-  })).filter((row) => Boolean(row.participantId));
+  }); }).filter((row) => Boolean(row.participantId));
 }
 
 async function kv(): Promise<KVNamespace> {

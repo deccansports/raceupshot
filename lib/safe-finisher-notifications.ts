@@ -3,7 +3,7 @@ import type { KVNamespace } from '@cloudflare/workers-types';
 import { z } from './zod';
 import { getAdminParticipantRoster } from './participant-chip-assignments';
 import { getEventBySlug } from './raceupshot-repository';
-import { getLiveTrackingHubConfig } from './live-tracking-hub-config';
+import { getLiveTrackingHubConfig, type LiveTrackingHubConfig } from './live-tracking-hub-config';
 import { finisherEligibility, notificationIdentity, type NotificationActor, type NotificationLedgerRecord, type TransactionalChannel } from './transactional-notification-contract';
 import { assertTransactionalSendsEnabled } from './transactional-notification-gate';
 import { claimNotification, completeNotification, correctNotificationContact, readNotificationContacts, readNotificationLedger, recordNotificationSkip } from './transactional-notification-ledger';
@@ -11,6 +11,7 @@ import { sendBergtecnoEmail } from './bergtecno-email';
 import { normalizeAiSensyPhone, sendAiSensyWhatsApp } from './aisensy-whatsapp';
 import { resultWhatsAppParameters, resultRaceBreakdown, resultFinishTime, type ResultLeg } from './finisher-result-template';
 import type { FinisherNotificationChannel, FinisherTraceRow, ResultEmailRecipient, ResultEmailSummary } from './result-emails';
+import { reconcileCanonicalFinisherResults } from './canonical-finisher-publication';
 
 type Row = Record<string, unknown>;
 type Event = NonNullable<Awaited<ReturnType<typeof getEventBySlug>>>;
@@ -28,17 +29,21 @@ async function getKv(): Promise<KVNamespace> {
   return env.RACEUPSHOT;
 }
 
-function categoryId(event: Event, row: Row, category: string): string {
+function notificationContest(event: Event, config: LiveTrackingHubConfig | null, row: Row, category: string): { contestId: string; category: string } {
   const explicit = text(row, 'ticketId', 'contestId', 'providerContestUuid');
-  if (explicit) return explicit;
-  const candidates = [...(event.tickets ?? []), ...(event.ticketDefinitions ?? [])].filter((ticket) => ticket.name.toLowerCase() === category.toLowerCase() || ticket.id.toLowerCase() === category.toLowerCase());
-  return candidates.length === 1 ? candidates[0].id : category;
+  const mapping = config?.contestMappings?.find((item) => item.providerContestUuid === explicit || item.contestId === explicit || item.contestId.toLowerCase() === category.toLowerCase());
+  const mappedCategory = mapping?.contestId || category;
+  const candidates = [...(event.tickets ?? []), ...(event.ticketDefinitions ?? [])].filter((ticket) => ticket.name.toLowerCase() === mappedCategory.toLowerCase() || ticket.id.toLowerCase() === mappedCategory.toLowerCase());
+  return { contestId: candidates.length === 1 ? candidates[0].id : mapping?.contestId || explicit || category, category: candidates.length === 1 ? candidates[0].name : mappedCategory };
 }
 
-function isTriathlon(event: Event, contestId: string, category: string): boolean {
+function isTriathlon(event: Event, contestId: string, category: string, providerCategory: string, row: Row): boolean {
+  const resultLegs = Array.isArray(row.legTimes) ? row.legTimes as ResultLeg[] : [];
+  const resultLegNames = new Set(resultLegs.map((leg) => leg.name.trim().toUpperCase()));
+  if (['SWIM', 'BIKE', 'RUN'].every((name) => resultLegNames.has(name))) return true;
   const ticket = (event.ticketDefinitions ?? []).find((item) => item.id === contestId || item.name.toLowerCase() === category.toLowerCase());
   if (ticket?.legs.length) return ['SWIM', 'BIKE', 'RUN'].every((type) => ticket.legs.some((leg) => leg.type === type));
-  return /triathlon|ironman/i.test(category);
+  return /triathlon|ironman/i.test(`${category} ${providerCategory}`);
 }
 
 function duration(row: Row): string {
@@ -56,7 +61,7 @@ function legacyAccepted(record: unknown): boolean {
   return value.status === 'ACCEPTED' || (value.status === 'SENT' && value.schemaVersion === 3);
 }
 
-async function loadRecipients(event: Event, filterCategory: string, contacts: Record<string, Contact>): Promise<Recipient[]> {
+async function loadRecipients(event: Event, config: LiveTrackingHubConfig | null, filterCategory: string, contacts: Record<string, Contact>): Promise<Recipient[]> {
   if (!event.hasResults || ['draft', 'archived'].includes(String(event.status ?? '').toLowerCase())) return [];
   const kv = await getKv();
   const ids = await kv.get<string[]>(`raceupshot:event:${event.id}:results:index`, 'json') ?? [];
@@ -73,15 +78,19 @@ async function loadRecipients(event: Event, filterCategory: string, contacts: Re
     if (!row) continue;
     const sourceId = text(row, 'notificationSourceId');
     if (!sourceId) continue;
-    const key = `${categoryId(event, row, text(row, 'category', 'Category', 'contestName'))}:${sourceId}`;
+    const rawCategory = text(row, 'category', 'Category', 'contestName');
+    const key = `${notificationContest(event, config, row, rawCategory).contestId}:${sourceId}`;
     sourceCounts.set(key, (sourceCounts.get(key) ?? 0) + 1);
   }
   const rows = rawRows.flatMap((row, index) => {
     if (!row) return [];
     const resultId = ids[index];
-    const category = text(row, 'category', 'Category', 'contestName');
-    if (!category || (filterCategory !== 'Overall' && category.toLowerCase() !== filterCategory.toLowerCase())) return [];
-    const contestId = categoryId(event, row, category);
+    const providerCategory = text(row, 'providerContestName', 'category', 'Category', 'contestName');
+    const rawCategory = text(row, 'category', 'Category', 'contestName');
+    if (!rawCategory) return [];
+    const contest = notificationContest(event, config, row, rawCategory);
+    const { contestId, category } = contest;
+    if (filterCategory !== 'Overall' && category.toLowerCase() !== filterCategory.toLowerCase() && rawCategory.toLowerCase() !== filterCategory.toLowerCase()) return [];
     const claimedSourceId = text(row, 'notificationSourceId');
     const bib = text(row, 'bib', 'Bib Number', 'bibNumber');
     const sourceId = claimedSourceId && claimedSourceId.toLowerCase() !== bib.toLowerCase()
@@ -95,7 +104,7 @@ async function loadRecipients(event: Event, filterCategory: string, contacts: Re
     const override = contacts[identity];
     const email = (override?.email ?? (text(row, 'email', 'Email', 'emailAddress') || text(matchingRegistration ?? {}, 'email'))).toLowerCase();
     const mobile = normalizeAiSensyPhone(override?.mobile ?? (text(row, 'mobile', 'Mobile', 'phone', 'whatsapp') || text(matchingRegistration ?? {}, 'mobile')));
-    const triathlon = isTriathlon(event, contestId, category);
+    const triathlon = isTriathlon(event, contestId, category, providerCategory, row);
     const eligibility = finisherEligibility(row, triathlon);
     const legTimes = Array.isArray(row.legTimes) ? row.legTimes as ResultLeg[] : [];
     return [{ id: resultId, resultId, ledgerParticipantId, rawSourceId: claimedSourceId, stableSourceIdentity: Boolean(sourceId), identity, contestId, email, mobile, name: text(row, 'name', 'Name', 'fullName') || 'Athlete', bib, category,
@@ -130,10 +139,11 @@ function channelSummary(rows: FinisherTraceRow[], channel: TransactionalChannel)
 }
 
 async function loaded(eventId: string, category: string) {
+  await reconcileCanonicalFinisherResults(eventId).catch((error) => console.error(JSON.stringify({ type: 'canonical_finisher_reconciliation_failed', eventId, error: error instanceof Error ? error.message : String(error) })));
   const event = await getEventBySlug(eventId, { includeUnpublished: true });
   if (!event) throw new Error('Event not found.');
   const [ledger, contacts, config] = await Promise.all([readNotificationLedger(event.id), readNotificationContacts(event.id), getLiveTrackingHubConfig(event.id)]);
-  const members = await loadRecipients(event, category, contacts);
+  const members = await loadRecipients(event, config, category, contacts);
   const byKey = new Map(ledger.map((record) => [ledgerKey(record.identity, record.channel), record]));
   return { event, config, members, byKey };
 }
@@ -165,7 +175,8 @@ export async function safeFinisherSummary(eventId: string, category = 'Overall',
 
 export async function safeFinisherSummaries(eventId: string, categories: string[], channels: TransactionalChannel[]): Promise<Record<string, ResultEmailSummary>> {
   const data = await loaded(eventId, 'Overall');
-  return Object.fromEntries([...new Set(['Overall', ...categories])].map((category) => [category, summaryFromLoaded({ ...data, members: category === 'Overall' ? data.members : data.members.filter((member) => member.category.toLowerCase() === category.toLowerCase()) }, category, channels)]));
+  const publishedCategories = data.members.map((member) => member.category).filter(Boolean);
+  return Object.fromEntries([...new Set(['Overall', ...categories, ...publishedCategories])].map((category) => [category, summaryFromLoaded({ ...data, members: category === 'Overall' ? data.members : data.members.filter((member) => member.category.toLowerCase() === category.toLowerCase()) }, category, channels)]));
 }
 
 function templateFor(config: NonNullable<Awaited<ReturnType<typeof getLiveTrackingHubConfig>>>, channel: TransactionalChannel, triathlon: boolean): string {
@@ -224,8 +235,9 @@ export async function safeSendFinisherBatch(eventId: string, category: string, c
     const sourceUnchanged = latest && text(latest, 'notificationSourceId') === member.rawSourceId
       && text(latest, 'name', 'Name', 'fullName') === member.name
       && text(latest, 'bib', 'Bib Number', 'bibNumber') === member.bib;
+    const latestContest = latest ? notificationContest(event, config, latest, text(latest, 'category', 'Category', 'contestName')) : null;
     const stillEligible = activeEvent?.hasResults && !['draft', 'archived'].includes(String(activeEvent.status ?? '').toLowerCase()) && latest && finisherEligibility(latest, member.triathlon).eligible
-      && text(latest, 'category', 'Category', 'contestName').toLowerCase() === member.category.toLowerCase() && sourceUnchanged && contactUnchanged;
+      && latestContest?.category.toLowerCase() === member.category.toLowerCase() && sourceUnchanged && contactUnchanged;
     if (!stillEligible) {
       await completeNotification({ eventId: event.id, identity: member.identity, channel, token: claim.token, state: 'SKIPPED', actor, recipient, reason: 'RESULT_OR_CONTACT_CHANGED_BEFORE_SEND' });
       continue;

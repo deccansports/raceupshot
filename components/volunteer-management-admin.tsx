@@ -9,7 +9,7 @@ import type {
   VolunteerProfile,
   VolunteerStatus,
 } from "@/lib/volunteer-management";
-import { normalizeVolunteerModules } from "@/lib/volunteer-management";
+import { normalizeVolunteerModules, volunteerAssignmentMatchesEvent } from "@/lib/volunteer-management";
 import { bikeOperationResetIds } from "@/lib/volunteer-bike-log-state";
 import { waiverOperationResetIds } from "@/lib/volunteer-waiver-log-state";
 import type { VolunteerEventCheckInSummary } from "@/lib/volunteer-operations";
@@ -22,10 +22,12 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { CounterNotificationSettings } from './counter-notification-settings';
 import { BikeRackingAdmin } from './bike-racking-admin';
+import { CateringAdmin } from './catering-admin-v2';
 
 const tabs = [
   ["assignments", "Assignments", UserRoundPlus],
   ["custom-counters", "Custom Counters", Utensils],
+  ["catering", "Catering / Food & Items", Utensils],
   ["notifications", "Counter Notifications", ClipboardCheck],
   ["timing-chip", "Time Chip Log", QrCode],
   ["volunteer-band", "Volunteer Band Log", Users],
@@ -37,7 +39,7 @@ const tabs = [
   ["bike-out", "Bike-out Log", Bike],
   ["locker", "Locker Log", ShieldCheck],
   ["medal", "Finisher Items", BadgeCheck],
-  ["food", "Catering / Food", Utensils],
+  ["food", "Legacy Food Log", Utensils],
   ["paid-food", "Paid Food", Utensils],
   ["activity", "Activity", ShieldCheck],
 ] as const;
@@ -49,7 +51,7 @@ const moduleLabels: Record<VolunteerModule, string> = {
   BIKE_CHECK_IN: "Bike Check-In",
   BIKE_CHECK_OUT: "Bike Check-Out",
   MEDAL_COUNTER: "Finisher Medal / Goodies",
-  FOOD_COUNTER: "Food Counter",
+  FOOD_COUNTER: "Catering / Food & Items",
   PAID_FOOD_COUNTER: "Paid Food Redemption",
   LOCKER_COUNTER: "Locker Counter",
   COUNTER: "Counter",
@@ -68,7 +70,7 @@ const moduleDescriptions: Record<VolunteerModule, string> = {
   BIKE_CHECK_IN: "Record helmet, rack and bike entry.",
   BIKE_CHECK_OUT: "Record secure bike collection.",
   MEDAL_COUNTER: "Record one finisher medal / goodies bundle per athlete.",
-  FOOD_COUNTER: "Record food issuance once per athlete.",
+  FOOD_COUNTER: "Serve scheduled athlete and volunteer meals and configured items; view stock and serving logs.",
   PAID_FOOD_COUNTER: "Search and redeem purchased food coupons by code, order, mobile or email.",
   LOCKER_COUNTER: "Assign and view athlete locker numbers.",
   COUNTER: "Assign the volunteer to an event counter station with athlete scan and lookup access.",
@@ -112,8 +114,27 @@ function displayDate(value: string | null | undefined) {
   if (!value) return "—";
   const parsed = new Date(value);
   return Number.isFinite(parsed.getTime())
-    ? new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(parsed)
+    ? new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short", hourCycle: "h23" }).format(parsed)
     : "—";
+}
+
+function displayDateOnly(value: string | null | undefined) {
+  if (!value) return "—";
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime())
+    ? new Intl.DateTimeFormat("en-IN", { dateStyle: "medium" }).format(parsed)
+    : "—";
+}
+
+function displayStampTime(value: string | null | undefined) {
+  if (!value) return "—";
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) return "—";
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    hour: "2-digit", minute: "2-digit", second: "2-digit", fractionalSecondDigits: 3, hourCycle: "h23",
+  }).formatToParts(parsed);
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value || "00";
+  return `${part("hour")}:${part("minute")}:${part("second")}:${part("fractionalSecond")}`;
 }
 
 function csvCell(value: string | number | null | undefined): string {
@@ -169,6 +190,7 @@ export function VolunteerManagementAdmin({
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [statsLoading, setStatsLoading] = useState(true);
 
   const latestOperationEventId = useMemo(() => [...checkIns, ...manualTiming]
     .filter((row) => events.some((event) => event.id === row.eventId))
@@ -184,15 +206,18 @@ export function VolunteerManagementAdmin({
     return volunteers.filter((volunteer) => `${volunteer.name} ${volunteer.email} ${volunteer.mobile} ${volunteer.assignments.map((item) => item.eventName).join(" ")}`.toLowerCase().includes(term));
   }, [query, volunteers]);
 
-  const eventVolunteers = useMemo(() => volunteers.filter((volunteer) => volunteer.assignments.some((assignment) => assignment.eventId === effectiveEventId)), [effectiveEventId, volunteers]);
+  const eventVolunteers = useMemo(() => {
+    if (!selectedEvent) return [];
+    return volunteers.filter((volunteer) => volunteer.assignments.some((assignment) => volunteerAssignmentMatchesEvent(assignment, selectedEvent)));
+  }, [selectedEvent, volunteers]);
   const stats = useMemo(() => ({
     active: eventVolunteers.filter((volunteer) => volunteer.status === "ACTIVE").length,
-    assigned: eventVolunteers.filter((volunteer) => volunteer.status === "ACTIVE" && volunteer.assignments.some((assignment) => assignment.eventId === effectiveEventId && assignment.active)).length,
+    assigned: eventVolunteers.filter((volunteer) => volunteer.status === "ACTIVE" && (selectedEvent ? volunteer.assignments.some((assignment) => volunteerAssignmentMatchesEvent(assignment, selectedEvent) && assignment.active) : false)).length,
     invited: eventVolunteers.filter((volunteer) => volunteer.status === "INVITED").length,
     disabled: eventVolunteers.filter((volunteer) => volunteer.status === "DISABLED").length,
-    checkInAssignments: eventVolunteers.flatMap((volunteer) => volunteer.assignments).filter((assignment) => assignment.eventId === effectiveEventId && assignment.active && (assignment.modules.includes("ATHLETE_CHECK_IN") || assignment.modules.includes("WAIVER_CHECK_IN"))).length,
-    timingAssignments: eventVolunteers.flatMap((volunteer) => volunteer.assignments).filter((assignment) => assignment.eventId === effectiveEventId && assignment.active && assignment.modules.includes("MANUAL_TIMING")).length,
-  }), [effectiveEventId, eventVolunteers]);
+    checkInAssignments: eventVolunteers.flatMap((volunteer) => volunteer.assignments).filter((assignment) => selectedEvent ? volunteerAssignmentMatchesEvent(assignment, selectedEvent) && assignment.active && (assignment.modules.includes("ATHLETE_CHECK_IN") || assignment.modules.includes("WAIVER_CHECK_IN")) : false).length,
+    timingAssignments: eventVolunteers.flatMap((volunteer) => volunteer.assignments).filter((assignment) => selectedEvent ? volunteerAssignmentMatchesEvent(assignment, selectedEvent) && assignment.active && assignment.modules.includes("MANUAL_TIMING") : false).length,
+  }), [eventVolunteers, selectedEvent]);
 
   const eventCheckIns = useMemo(() => checkIns.filter((row) => row.eventId === effectiveEventId), [checkIns, effectiveEventId]);
   const eventManualTiming = useMemo(() => manualTiming.filter((row) => row.eventId === effectiveEventId), [effectiveEventId, manualTiming]);
@@ -261,6 +286,20 @@ export function VolunteerManagementAdmin({
     setCheckInSummaries(null);
     if (tab === "checkins") void loadCheckInSummaries();
   }
+
+  useEffect(() => {
+    let active = true;
+    void refresh()
+      .catch((caught) => {
+        if (active) setError(caught instanceof Error ? caught.message : "Unable to refresh volunteer statistics.");
+      })
+      .finally(() => {
+        if (active) setStatsLoading(false);
+      });
+    return () => { active = false; };
+    // The initial client reconciliation must run only once after hydration.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function startCreate() {
     setDraft(emptyDraft());
@@ -484,9 +523,9 @@ export function VolunteerManagementAdmin({
       <section className="admin-card volunteer-stats-panel" aria-label="Volunteer statistics">
         <div className="volunteer-stats-heading"><div><h2>Volunteer Stats</h2><p>All counters and operation logs are scoped to one event.</p></div><label className="volunteer-event-filter"><span>EVENT</span><select value={effectiveEventId} onChange={(event) => setSelectedEventId(event.target.value)}>{events.map((event) => <option key={event.id} value={event.id}>{event.name}</option>)}</select></label></div>
         <div className="volunteer-stats-grid">
-          <article><strong>{eventVolunteers.length}</strong><span>Total Volunteers</span></article>
-          <article className="volunteer-stat-assigned"><strong>{stats.assigned}</strong><span>Active / Assigned</span></article>
-          <article className="volunteer-stat-unassigned"><strong>{Math.max(0, eventVolunteers.length - stats.assigned)}</strong><span>Unassigned</span></article>
+          <article><strong>{statsLoading ? "…" : eventVolunteers.length}</strong><span>Total Volunteers</span></article>
+          <article className="volunteer-stat-assigned"><strong>{statsLoading ? "…" : stats.assigned}</strong><span>Active / Assigned</span></article>
+          <article className="volunteer-stat-unassigned"><strong>{statsLoading ? "…" : Math.max(0, eventVolunteers.length - stats.assigned)}</strong><span>Unassigned</span></article>
         </div>
       </section>
 
@@ -551,9 +590,10 @@ export function VolunteerManagementAdmin({
       {tab === "checkins" && <><CheckInSummary summaries={checkInSummaries} eventId={effectiveEventId} eventName={selectedEvent?.name || "Selected event"} loading={checkInSummaryLoading} error={checkInSummaryError} onRetry={() => void loadCheckInSummaries()} /><OperationTable title="Athlete & Waiver Check-In Log" description="Athlete check-in, waiver verification and administrator reset actions." rows={operationRows.checkins} kind="checkin" busy={busy} resetWaiverOperationIds={resetWaiverOperationIds} onWaiverReset={resetWaiverCheckIn} onDeleteRows={deleteWaiverLogs} /></>}
       {tab === "bike-racking" && <BikeRackingAdmin events={events} />}
       {tab === "bike-in" && <OperationTable title="Bike-in Log" description="Bike entry, helmet verification and rack-assignment actions." rows={operationRows["bike-in"]} kind="checkin" busy={busy} resetBikeOperationIds={resetBikeOperationIds} onBikeReset={resetBikeCheckIn} />}
-      {tab === "bike-out" && <OperationTable title="Bike-out Log" description="Secure bike collection and checkout actions." rows={operationRows["bike-out"]} kind="checkin" busy={busy} resetBikeOperationIds={resetBikeOperationIds} onBikeReset={resetBikeCheckIn} />}
+      {tab === "bike-out" && <><BikeCheckoutSummary rows={operationRows["bike-out"]} resetBikeOperationIds={resetBikeOperationIds} /><OperationTable title="Bike-out Log" description="Secure bike collection, timing-chip return, and checkout audit actions." rows={operationRows["bike-out"]} kind="checkin" busy={busy} resetBikeOperationIds={resetBikeOperationIds} onBikeReset={resetBikeCheckIn} /></>}
       {tab === "medal" && <OperationTable title="Finisher Items Log" description="Finisher medals and goodies recorded by assigned volunteers." rows={operationRows.medal} kind="checkin" />}
-      {tab === "food" && <OperationTable title="Food Counter Log" description="Food issuance recorded by assigned volunteers." rows={operationRows.food} kind="checkin" />}
+      {tab === "food" && <OperationTable title="Food Counter Log" description="Legacy food issuance recorded by assigned volunteers. Scheduled catering uses its own serving log." rows={operationRows.food} kind="checkin" />}
+      {tab === "catering" && <CateringAdmin key={effectiveEventId} eventId={effectiveEventId} eventName={selectedEvent?.name || "Selected event"} categories={selectedEvent?.categories ?? []} events={events} onEventChange={setSelectedEventId} />}
       {tab === "paid-food" && <PaidFoodPanel key={effectiveEventId} eventId={effectiveEventId} eventName={selectedEvent?.name || "Selected event"} />}
       {tab === "locker" && <OperationTable title="Locker Counter Log" description="Locker assignments recorded by assigned volunteers." rows={operationRows.locker} kind="checkin" />}
       {tab === "timing-chip" && <OperationTable title="Timing Chip Assignment Log" description="Event timing-chip assignments and replacements." rows={operationRows["timing-chip"]} kind="checkin" />}
@@ -753,6 +793,11 @@ function CheckInSummary({ summaries, eventId, eventName, loading, error, onRetry
   </>;
 }
 
+function BikeCheckoutSummary({ rows, resetBikeOperationIds }: { rows: VolunteerOperationLog[]; resetBikeOperationIds: ReadonlySet<string> }) {
+  const active = rows.filter((row) => !resetBikeOperationIds.has(row.id));
+  return <section className="admin-card volunteer-operation-log"><div className="admin-card-head"><div><h2>Bike Checkout & Chip Return</h2><p>Server-confirmed return status. Returned chips remain assigned until inventory reconciliation.</p></div></div><div className="admin-kpis volunteer-kpis"><article className="kpi-card"><span>Bikes checked out</span><strong>{active.length}</strong></article><article className="kpi-card"><span>Chips expected</span><strong>{active.filter((row) => row.assignedChipCode).length}</strong></article><article className="kpi-card"><span>Chips returned</span><strong>{active.filter((row) => row.chipReturnStatus === "RETURNED").length}</strong></article><article className="kpi-card"><span>Not returned</span><strong>{active.filter((row) => row.chipReturnStatus === "NOT_RETURNED").length}</strong></article><article className="kpi-card"><span>No chip assigned</span><strong>{active.filter((row) => row.chipReturnStatus === "NO_CHIP_ASSIGNED").length}</strong></article></div><div className="table-wrap"><table className="leaderboard"><thead><tr><th>BIB</th><th>ATHLETE</th><th>ASSIGNED CHIP</th><th>RETURNED CHIP</th><th>CHIP STATUS</th><th>BIKE CHECKOUT</th></tr></thead><tbody>{active.map((row) => <tr key={row.id}><td>{row.bib || "—"}</td><td>{row.athleteName || row.participantUid}</td><td>{row.assignedChipCode || "N/A"}</td><td>{row.returnedChipCode || "N/A"}</td><td><span className="status-pill">{row.chipReturnStatus?.replaceAll("_", " ") || "PENDING RETURN"}</span></td><td>Completed</td></tr>)}</tbody></table></div>{!active.length && <p className="admin-empty">No bike checkout records exist for this event.</p>}</section>;
+}
+
 function OperationTable({ title, description, rows, kind, busy = false, resetBikeOperationIds = new Set<string>(), resetWaiverOperationIds = new Set<string>(), onBikeReset, onWaiverReset, onTimingAction, onDeleteRows }: {
   title: string;
   description: string;
@@ -772,6 +817,7 @@ function OperationTable({ title, description, rows, kind, busy = false, resetBik
   const resetOperationIds = new Set(rows
     .filter((row) => row.action === "MANUAL_TIMING_RESET" && row.reversesOperationId)
     .map((row) => row.reversesOperationId));
+  const isBikeCheckout = rows.some((row) => row.action === "BIKE_OUT") || /bike check-out/i.test(title);
 
   async function downloadList() {
     if (kind === "timing") {
@@ -803,8 +849,8 @@ function OperationTable({ title, description, rows, kind, busy = false, resetBik
       XLSX.writeFile(workbook, `time-keeper-${eventFileName || "event"}-ranked-results.xlsx`, { cellDates: true });
       return;
     }
-    const header = ["Time", "Event", "Event ID", "Action", "BIB", "Athlete", "Participant ID", "Volunteer", "Volunteer ID", "Status", "Record ID"];
-    const body = filtered.map((row) => [row.capturedAt, row.eventName, row.eventId, row.action, row.bib, row.athleteName, row.participantUid, row.volunteerName, row.volunteerId, resetOperationIds.has(row.id) || resetBikeOperationIds.has(row.id) ? "RESET" : row.status, row.id]);
+    const header = ["Time", "Event", "Event ID", "Action", "BIB", "Athlete", "Participant ID", ...(isBikeCheckout ? ["Assigned Chip", "Returned Chip", "Chip Return Status", "Return Method", "Return Reason", "Bike Checkout Transaction ID"] : []), "Volunteer", "Volunteer ID", "Status", "Record ID"];
+    const body = filtered.map((row) => [row.capturedAt, row.eventName, row.eventId, row.action, row.bib, row.athleteName, row.participantUid, ...(isBikeCheckout ? [row.assignedChipCode || "N/A", row.returnedChipCode || "N/A", row.chipReturnStatus || "PENDING_RETURN", row.chipReturnMethod || "", row.chipReturnReason || "", row.bikeCheckoutTransactionId || ""] : []), row.volunteerName, row.volunteerId, resetOperationIds.has(row.id) || resetBikeOperationIds.has(row.id) ? "RESET" : row.status, row.id]);
     const csv = [header, ...body].map((record) => record.map((value) => csvCell(value)).join(",")).join("\n");
     const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -815,11 +861,11 @@ function OperationTable({ title, description, rows, kind, busy = false, resetBik
     URL.revokeObjectURL(url);
   }
 
-  return <section className="admin-card volunteer-operation-log"><div className="admin-card-head"><div><h2>{title}</h2><p>{description}</p></div><div className="volunteer-log-head-actions"><span className="status-pill">{eventRows.length} records</span><button className="button button-secondary" type="button" disabled={!filtered.length} onClick={() => void downloadList()}><Download /> {kind === "timing" ? "Download Ranked Excel" : "Download list"}</button>{onDeleteRows && <button className="button button-danger" type="button" disabled={busy || !filtered.length} onClick={() => void onDeleteRows(filtered, !query.trim())}><Trash2 /> {query.trim() ? `Clear filtered (${filtered.length})` : "Clear event logs"}</button>}</div></div><label className="volunteer-search"><Search /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={kind === "timing" ? "Search BIB, athlete, volunteer or timing point" : "Search BIB, athlete or volunteer"} /></label><div className="table-wrap"><table className={`leaderboard ${kind === "timing" ? "timing-operation-table" : ""}`}><thead><tr><th>TIME</th><th>EVENT</th><th>ACTION</th><th>BIB / ATHLETE</th>{kind === "timing" && <><th>ELAPSED TIME</th><th>OVERALL RANK</th><th>GENDER RANK</th><th>AGE CATEGORY RANK</th><th>TIMING POINT</th></>}<th>VOLUNTEER</th><th>STATUS</th>{(kind === "timing" || onBikeReset || onWaiverReset || onDeleteRows) && <th>ACTIONS</th>}</tr></thead><tbody>{filtered.map((row) => {
+  return <section className="admin-card volunteer-operation-log"><div className="admin-card-head"><div><h2>{title}</h2><p>{description}</p></div><div className="volunteer-log-head-actions"><span className="status-pill">{eventRows.length} records</span><button className="button button-secondary" type="button" disabled={!filtered.length} onClick={() => void downloadList()}><Download /> {kind === "timing" ? "Download Ranked Excel" : "Download list"}</button>{onDeleteRows && <button className="button button-danger" type="button" disabled={busy || !filtered.length} onClick={() => void onDeleteRows(filtered, !query.trim())}><Trash2 /> {query.trim() ? `Clear filtered (${filtered.length})` : "Clear event logs"}</button>}</div></div><label className="volunteer-search"><Search /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={kind === "timing" ? "Search BIB, athlete, volunteer or timing point" : "Search BIB, athlete or volunteer"} /></label><div className="table-wrap"><table className={`leaderboard ${kind === "timing" ? "timing-operation-table" : ""}`}><thead><tr>{kind === "timing" ? <><th>DATE</th><th>STAMP TIME</th></> : <th>TIME</th>}<th>EVENT</th><th>ACTION</th><th>BIB / ATHLETE</th>{kind === "timing" && <><th>CANONICAL CHIP TIME</th><th>CANONICAL GUN TIME</th><th>OVERALL RANK</th><th>GENDER RANK</th><th>AGE CATEGORY RANK</th><th>TIMING POINT</th></>}<th>VOLUNTEER</th><th>STATUS</th>{(kind === "timing" || onBikeReset || onWaiverReset || onDeleteRows) && <th>ACTIONS</th>}</tr></thead><tbody>{filtered.map((row) => {
     const isReset = resetOperationIds.has(row.id);
     const isBikeReset = resetBikeOperationIds.has(row.id);
     const isWaiverReset = resetWaiverOperationIds.has(row.id);
-    return <tr key={row.id}><td className="time">{displayDate(row.capturedAt)}</td><td>{row.eventName || row.eventId}</td><td>{row.action.replaceAll("_", " ")}</td><td><b>{row.bib || "—"}</b><small>{row.athleteName || row.participantUid}</small></td>{kind === "timing" && <><td className="time"><b>{displayDuration(row.rankingElapsedMilliseconds)}</b><small>{row.rankingStartSource === "CANONICAL" ? "Canonical start" : row.rankingStartSource === "SAVED_GUN" ? "Saved gun start" : "Start unavailable"}</small></td><td className="rank">{row.overallRank ? `#${row.overallRank}` : "—"}</td><td className="rank">{row.genderRank ? `#${row.genderRank}` : "—"}</td><td className="rank">{row.ageGroupRank ? `#${row.ageGroupRank}` : "—"}</td><td>{row.timingPointName || "—"}</td></>}<td>{row.volunteerName || row.volunteerId}</td><td><span className="status-pill">{isReset || isBikeReset || isWaiverReset ? "RESET" : row.status}</span></td>{kind === "timing" && <td><div className="volunteer-row-actions">{row.action === "MANUAL_TIMING_CAPTURED" && <button className="button button-secondary" type="button" disabled={busy || isReset} onClick={() => void onTimingAction?.(row, "reset")}><RotateCcw /> Reset</button>}<button className="button button-danger" type="button" disabled={busy} onClick={() => void onTimingAction?.(row, "delete")}><Trash2 /> Delete</button></div></td>}{kind !== "timing" && (onBikeReset || onWaiverReset || onDeleteRows) && <td><div className="volunteer-row-actions">{onBikeReset && <button className="button button-secondary" type="button" disabled={busy || isBikeReset} onClick={() => void onBikeReset(row)}><RotateCcw /> {isBikeReset ? "Reset completed" : "Reset bike"}</button>}{onWaiverReset && row.action === "WAIVER_VERIFY" && <button className="button button-secondary" type="button" disabled={busy || isWaiverReset} onClick={() => void onWaiverReset(row)}><RotateCcw /> {isWaiverReset ? "Reset completed" : "Reset waiver"}</button>}{onDeleteRows && <button className="button button-danger" type="button" disabled={busy} onClick={() => void onDeleteRows([row], false)}><Trash2 /> Delete</button>}</div></td>}</tr>;
+    return <tr key={row.id}>{kind === "timing" ? <><td className="time">{displayDateOnly(row.capturedAt)}</td><td className="time">{displayStampTime(row.capturedAt)}<small>Manual device stamp</small></td></> : <td className="time">{displayDate(row.capturedAt)}</td>}<td>{row.eventName || row.eventId}</td><td>{row.action.replaceAll("_", " ")}</td><td><b>{row.bib || "—"}</b><small>{row.athleteName || row.participantUid}</small></td>{kind === "timing" && <><td className="time"><b>{displayDuration(row.rankingChipElapsedMilliseconds)}</b><small>{row.rankingChipElapsedMilliseconds == null ? "No canonical result" : "Feibot canonical"}</small></td><td className="time"><b>{displayDuration(row.rankingGunElapsedMilliseconds)}</b><small>{row.rankingGunElapsedMilliseconds == null ? "No canonical result" : "Feibot canonical"}</small></td><td className="rank">{row.overallRank ? `#${row.overallRank}` : "—"}</td><td className="rank">{row.genderRank ? `#${row.genderRank}` : "—"}</td><td className="rank">{row.ageGroupRank ? `#${row.ageGroupRank}` : "—"}</td><td>{row.timingPointName || "—"}</td></>}<td>{row.volunteerName || row.volunteerId}</td><td><span className="status-pill">{isReset || isBikeReset || isWaiverReset ? "RESET" : row.status}</span></td>{kind === "timing" && <td><div className="volunteer-row-actions">{row.action === "MANUAL_TIMING_CAPTURED" && <button className="button button-secondary" type="button" disabled={busy || isReset} onClick={() => void onTimingAction?.(row, "reset")}><RotateCcw /> Reset</button>}<button className="button button-danger" type="button" disabled={busy} onClick={() => void onTimingAction?.(row, "delete")}><Trash2 /> Delete</button></div></td>}{kind !== "timing" && (onBikeReset || onWaiverReset || onDeleteRows) && <td><div className="volunteer-row-actions">{onBikeReset && <button className="button button-secondary" type="button" disabled={busy || isBikeReset} onClick={() => void onBikeReset(row)}><RotateCcw /> {isBikeReset ? "Reset completed" : "Reset bike"}</button>}{onWaiverReset && row.action === "WAIVER_VERIFY" && <button className="button button-secondary" type="button" disabled={busy || isWaiverReset} onClick={() => void onWaiverReset(row)}><RotateCcw /> {isWaiverReset ? "Reset completed" : "Reset waiver"}</button>}{onDeleteRows && <button className="button button-danger" type="button" disabled={busy} onClick={() => void onDeleteRows([row], false)}><Trash2 /> Delete</button>}</div></td>}</tr>;
   })}</tbody></table></div>{!filtered.length && <p className="admin-empty">No records are stored for this log yet.</p>}</section>;
 }
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { assertVolunteerBikeWaiverAvailable, effectiveVolunteerWaiverVerifiedAt, resetVolunteerWaiverCheckIn } from '../lib/volunteer-check-in-state';
-import { applyWaiverResetHistory, registrationWaiverVerifiedAt, volunteerWaiverOtpVariables } from '../lib/volunteer-operations';
+import { applyWaiverAsCheckIn, applyWaiverResetHistory, registrationWaiverVerifiedAt, volunteerWaiverOtpVariables } from '../lib/volunteer-operations';
 import type { VolunteerOperationLog } from '../lib/volunteer-management';
 import { signedWaiverConfirmationEmail } from '../lib/waiver-confirmation-email';
 
@@ -77,6 +77,23 @@ describe('volunteer waiver check-in', () => {
     const incomplete = { waiverVerifiedAt: '2026-10-09T10:10:00.000Z', emailOtpVerifiedAt: null, waiverResetAt: null };
     expect(effectiveVolunteerWaiverVerifiedAt(incomplete)).toBeNull();
     expect(() => assertVolunteerBikeWaiverAvailable(incomplete, true)).toThrow('must sign and verify');
+  });
+
+  it('treats a verified waiver as completed check-in', () => {
+    const signedAt = '2026-10-17T12:00:00.000Z';
+    expect(applyWaiverAsCheckIn({
+      waiverVerifiedAt: signedAt, waiverResetAt: null, emailOtpVerifiedAt: signedAt, checkedInAt: null,
+      bikeCheckedInAt: null, bikeCheckedOutAt: null, helmetChecked: false, bikeRack: null,
+      medalIssuedAt: null, foodIssuedAt: null, lockerNumber: null, updatedAt: signedAt, updatedBy: 'Volunteer',
+    })).toMatchObject({ waiverVerifiedAt: signedAt, checkedInAt: signedAt });
+  });
+
+  it('does not revive waiver check-in after an administrator reset', () => {
+    expect(applyWaiverAsCheckIn({
+      waiverVerifiedAt: null, waiverResetAt: '2026-10-17T12:05:00.000Z', emailOtpVerifiedAt: null, checkedInAt: null,
+      bikeCheckedInAt: null, bikeCheckedOutAt: null, helmetChecked: false, bikeRack: null,
+      medalIssuedAt: null, foodIssuedAt: null, lockerNumber: null, updatedAt: null, updatedBy: null,
+    }, '2026-10-17T12:00:00.000Z')).toMatchObject({ waiverVerifiedAt: null, checkedInAt: null });
   });
 
   it('accepts current waiver evidence but rejects evidence invalidated by a later reset', () => {
