@@ -1,0 +1,79 @@
+{
+  "expo": {
+    "name": "Race Upshot",
+    "slug": "raceupshot-tracking",
+    "scheme": "raceupshot",
+    "version": "1.0.0",
+    "icon": "./assets/app-icon.png",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": true,
+      "icon": "./assets/app-icon.png",
+      "bundleIdentifier": "com.raceupshot.app",
+      "associatedDomains": [
+        "applinks:raceupshot.com"
+      ]
+    },
+    "android": {
+      "package": "com.raceupshot.app",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/app-icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "autoVerify": true,
+          "data": [
+            {
+              "scheme": "https",
+              "host": "raceupshot.com",
+              "pathPrefix": "/events"
+            }
+          ],
+          "category": [
+            "BROWSABLE",
+            "DEFAULT"
+          ]
+        }
+      ]
+    },
+    "web": {
+      "bundler": "metro",
+      "favicon": "./assets/mobile-logo.png"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#FFFFFF",
+          "image": "./assets/mobile-logo.png",
+          "imageWidth": 280,
+          "resizeMode": "contain"
+        }
+      ],
+      "expo-secure-store",
+      "expo-notifications",
+      "expo-image",
+      "expo-status-bar",
+      "expo-web-browser"
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    },
+    "extra": {
+      "eas": {
+        "projectId": "9ce92376-caf4-450f-9b52-47382ee10442"
+      }
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/9ce92376-caf4-450f-9b52-47382ee10442"
+    }
+  }
+}

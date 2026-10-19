@@ -1,0 +1,17 @@
+node_modules/
+.DS_Store
+.expo/
+.env
+.env.*
+!.env.example
+dist/
+coverage/
+legacy-raceupshot-20260826/
+._*
+*.log
+*.jks
+*.keystore
+*.p8
+*.p12
+GoogleService-Info.plist
+google-services.json
