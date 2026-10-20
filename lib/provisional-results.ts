@@ -3,7 +3,11 @@ import type { LiveParticipant } from "@/packages/contracts/src";
 const RESULT_STATUSES = new Set(["FINISHED", "DNF", "DNS", "DNQ", "DSQ", "OTL"]);
 
 export function resultParticipants(participants: LiveParticipant[]): LiveParticipant[] {
-  return participants.filter((participant) => RESULT_STATUSES.has(participant.raceStatus));
+  return participants
+    .filter((participant) => RESULT_STATUSES.has(participant.raceStatus))
+    .sort((left, right) =>
+      (left.overallRank ?? Number.MAX_SAFE_INTEGER) - (right.overallRank ?? Number.MAX_SAFE_INTEGER)
+      || left.bib.localeCompare(right.bib));
 }
 
 export function shouldUseCanonicalResultFallback(

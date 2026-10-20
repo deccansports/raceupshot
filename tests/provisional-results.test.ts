@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { resultParticipants, shouldUseCanonicalResultFallback } from "../lib/provisional-results";
 import type { LiveParticipant } from "../packages/contracts/src";
 
-function participant(participantUid: string, raceStatus: LiveParticipant["raceStatus"]): LiveParticipant {
+function participant(participantUid: string, raceStatus: LiveParticipant["raceStatus"], overallRank?: number): LiveParticipant {
   return {
     eventId: "event-1",
     participantUid,
@@ -12,6 +12,7 @@ function participant(participantUid: string, raceStatus: LiveParticipant["raceSt
     contestName: "Olympic",
     visibility: "PUBLIC",
     raceStatus,
+    overallRank,
     splits: [],
   };
 }
@@ -19,10 +20,11 @@ function participant(participantUid: string, raceStatus: LiveParticipant["raceSt
 describe("provisional public results", () => {
   it("selects canonical finish outcomes and excludes athletes still racing", () => {
     expect(resultParticipants([
-      participant("finished", "FINISHED"),
+      participant("finished-second", "FINISHED", 2),
       participant("dnf", "DNF"),
       participant("running", "RUNNING"),
-    ]).map((row) => row.participantUid)).toEqual(["finished", "dnf"]);
+      participant("finished-first", "FINISHED", 1),
+    ]).map((row) => row.participantUid)).toEqual(["finished-first", "finished-second", "dnf"]);
   });
 
   it("falls back only when timing results are empty, never over verified published results", () => {
