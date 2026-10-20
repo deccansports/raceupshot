@@ -38,6 +38,7 @@ function toAthlete(participant: LiveParticipant, event: RaceEvent): Athlete {
 
 export function PlatformResultsLoader({ event }: { event: RaceEvent }) {
   const [athletes, setAthletes] = useState<Athlete[]>([]);
+  const [resultSource, setResultSource] = useState<"raceupshot" | "timing-provider" | "published-results">("raceupshot");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -50,7 +51,10 @@ export function PlatformResultsLoader({ event }: { event: RaceEvent }) {
       });
       const payload = await response.json() as ApiEnvelope<LiveParticipant[]> & { error?: { message?: string } };
       if (!response.ok || !payload.success) throw new Error(payload.error?.message || "Results are unavailable.");
-      if (active) setAthletes(payload.data.map((participant) => toAthlete(participant, event)));
+      if (active) {
+        setAthletes(payload.data.map((participant) => toAthlete(participant, event)));
+        setResultSource(payload.meta.source);
+      }
     };
     void (async () => {
       try {
@@ -82,5 +86,13 @@ export function PlatformResultsLoader({ event }: { event: RaceEvent }) {
 
   if (loading) return <div className="results-loading" role="status"><span className="auth-spinner" /><strong>Loading results…</strong></div>;
   if (error) return <div className="freshness-banner stale"><AlertTriangle /><span><b>Results unavailable</b><small>{error}</small></span></div>;
-  return <ResultsLeaderboardPanel eventSlug={event.slug} categories={event.categories} athletes={athletes} />;
+  return <>
+    {resultSource !== "published-results" && (
+      <div className="freshness-banner stale" role="status">
+        <AlertTriangle />
+        <span><b>Provisional results</b><small>These results come from canonical race timing and may change. Uploaded verified results will replace them automatically.</small></span>
+      </div>
+    )}
+    <ResultsLeaderboardPanel eventSlug={event.slug} categories={event.categories} athletes={athletes} />
+  </>;
 }

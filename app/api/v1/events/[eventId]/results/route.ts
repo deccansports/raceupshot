@@ -1,6 +1,9 @@
+import { canonicalManifestUpdatedAt, getCanonicalLiveEvent } from "@/lib/canonical-live-tracking";
+import { getLiveTrackingHubConfig } from "@/lib/live-tracking-hub-config";
 import { platformFailure, platformSuccess } from "@/lib/platform-api-response";
 import { participantViewerFromRequest } from "@/lib/participant-viewer";
-import { getPlatformEvent, getPublicResultParticipants } from "@/lib/platform-repository";
+import { getPlatformEvent, getPublicResultParticipants, sanitizePublicParticipantSplits } from "@/lib/platform-repository";
+import { resultParticipants, shouldUseCanonicalResultFallback } from "@/lib/provisional-results";
 
 export const dynamic = "force-dynamic";
 
@@ -15,9 +18,26 @@ export async function GET(request: Request, { params }: { params: Promise<{ even
     const viewer = await participantViewerFromRequest(request);
     const read = await getPublicResultParticipants(event.eventId, viewer);
     if (!read) return platformFailure("RESULTS_NOT_FOUND", "Results are not available", 404);
-    const results = read.data.filter((participant) =>
-      ["FINISHED", "DNF", "DNS", "DNQ", "DSQ", "OTL"].includes(participant.raceStatus));
-    return platformSuccess(results, { ...read, eventId: event.eventId, cacheSeconds: viewer ? 0 : 30 }, {
+    let results = resultParticipants(read.data);
+    let responseMeta = read;
+    if (shouldUseCanonicalResultFallback(results, read.source)) {
+      const [canonical, timingConfiguration] = await Promise.all([
+        getCanonicalLiveEvent(event.eventId),
+        getLiveTrackingHubConfig(event.eventId),
+      ]);
+      results = resultParticipants((canonical?.participants ?? []).map((participant) =>
+        sanitizePublicParticipantSplits(participant, timingConfiguration)));
+      if (canonical && results.length) {
+        responseMeta = {
+          ...read,
+          lastUpdatedAt: canonicalManifestUpdatedAt(canonical.manifest),
+          source: "timing-provider",
+          provider: canonical.manifest.provider.toLowerCase() === "feibot" ? "FEIBOT" : "RACE_UPSHOT",
+          isStale: false,
+        };
+      }
+    }
+    return platformSuccess(results, { ...responseMeta, eventId: event.eventId, cacheSeconds: viewer ? 0 : 30 }, {
       headers: viewer ? { "cache-control": "private, no-store" } : undefined,
     });
   } catch (error) {
