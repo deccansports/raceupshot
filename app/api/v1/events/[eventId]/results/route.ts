@@ -3,7 +3,7 @@ import { getLiveTrackingHubConfig } from "@/lib/live-tracking-hub-config";
 import { platformFailure, platformSuccess } from "@/lib/platform-api-response";
 import { participantViewerFromRequest } from "@/lib/participant-viewer";
 import { getPlatformEvent, getPublicResultParticipants, sanitizePublicParticipantSplits } from "@/lib/platform-repository";
-import { resultParticipants, shouldUseCanonicalResultFallback } from "@/lib/provisional-results";
+import { reconcileProvisionalParticipants, resultParticipants, shouldUseCanonicalResultFallback } from "@/lib/provisional-results";
 
 export const dynamic = "force-dynamic";
 
@@ -25,7 +25,10 @@ export async function GET(request: Request, { params }: { params: Promise<{ even
         getCanonicalLiveEvent(event.eventId),
         getLiveTrackingHubConfig(event.eventId),
       ]);
-      results = resultParticipants((canonical?.participants ?? []).map((participant) =>
+      const resolvedCanonical = canonical && timingConfiguration
+        ? reconcileProvisionalParticipants(canonical.participants, timingConfiguration)
+        : canonical?.participants ?? [];
+      results = resultParticipants(resolvedCanonical.map((participant) =>
         sanitizePublicParticipantSplits(participant, timingConfiguration)));
       if (canonical && results.length) {
         responseMeta = {
