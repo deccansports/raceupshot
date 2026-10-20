@@ -7,16 +7,18 @@ import { getEvents } from "@/lib/raceupshot-repository";
 export const dynamic = "force-dynamic";
 
 export default async function LivePage() {
-  const { live, past } = groupLivePageEvents(await getEvents());
+  const { live, upcoming, past } = groupLivePageEvents(await getEvents());
+  const hasLiveEvents = live.length > 0;
+  const featuredEvents = hasLiveEvents ? live : upcoming;
   return (
     <>
       <SiteHeader />
       <main>
         <section className="inner-hero"><div className="shell"><span className="eyebrow blue">LIVE RACE NETWORK</span><h1>On course, now.</h1><p>Follow leaders, timing reads, and athlete progress as races unfold, or revisit a past event.</p></div></section>
         <section className="page-section shell">
-          <div className="section-heading"><div><span className="eyebrow">LIVE NOW</span><h2>Events in motion.</h2></div></div>
-          <div className="events-grid">{live.map((event) => <EventCard key={event.slug} event={event} />)}</div>
-          {!live.length && <p className="admin-empty">No race is live right now. Past events remain available below.</p>}
+          <div className="section-heading"><div><span className="eyebrow">{hasLiveEvents ? "LIVE NOW" : "UPCOMING EVENTS"}</span><h2>{hasLiveEvents ? "Events in motion." : "Coming up next."}</h2></div></div>
+          <div className="events-grid">{featuredEvents.map((event) => <EventCard key={event.slug} event={event} />)}</div>
+          {!featuredEvents.length && <p className="admin-empty">No upcoming events are available yet.</p>}
 
           <div className="section-heading" style={{ marginTop: 70 }}><div><span className="eyebrow">PAST EVENTS</span><h2>Previous races.</h2></div></div>
           <div className="events-grid">{past.map((event) => <EventCard key={event.slug} event={event} />)}</div>

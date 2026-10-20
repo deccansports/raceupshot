@@ -21,15 +21,19 @@ describe("live tracking event directory", () => {
     const grouped = groupLivePageEvents(events);
 
     expect(grouped.live.map((event) => event.id)).toEqual(["live"]);
+    expect(grouped.upcoming.map((event) => event.id)).toEqual(["upcoming"]);
     expect(grouped.past.map((event) => event.id)).toEqual(["provisional", "official", "completed"]);
   });
 
-  it("still exposes past events when no event is live", () => {
+  it("provides upcoming events when no event is live and still exposes past events", () => {
     const grouped = groupLivePageEvents<TestEvent>([
+      { id: "upcoming-later", dateIso: "2026-11-10T00:00:00.000Z", status: "upcoming" },
+      { id: "upcoming-next", dateIso: "2026-11-01T00:00:00.000Z", status: "upcoming" },
       { id: "past", dateIso: "2026-10-01T00:00:00.000Z", status: "completed" },
     ]);
 
     expect(grouped.live).toEqual([]);
+    expect(grouped.upcoming.map((event) => event.id)).toEqual(["upcoming-next", "upcoming-later"]);
     expect(grouped.past.map((event) => event.id)).toEqual(["past"]);
   });
 });
